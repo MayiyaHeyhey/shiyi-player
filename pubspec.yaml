@@ -1,15 +1,16 @@
 # 十一 · 接着奏乐 —— 手机版（Android）
 #
-# 依赖策略：一个节点只加一个依赖，加完单独验证一次。
+# 依赖策略：一个节点只加一个「功能」，加完单独验证一次。
 #   N1：零依赖（只证明链路通）
 #   N2：+ on_audio_query（读系统媒体库：曲名/歌手/时长）
 #   N3：+ just_audio（前台播放：点歌出声 / 暂停 / 拖进度 / 上下曲）
-#   N4 起再加后台播放与系统控制中心。
+#   N4：+ just_audio_background（后台播放 + 通知栏/锁屏控制）
+#   N5 起：通知栏上下曲 / 视觉打磨 / 搜索。
 
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.3.0+4
+version: 0.4.0+5
 
 environment:
   # 不写上界，兼容未来更高版本的 Dart
@@ -24,9 +25,21 @@ dependencies:
 
   # N3：前台播放器（基于 androidx.media3 / ExoPlayer）。
   #     支持 content:// URI 直读、进度跳转、播完自动下一首。
-  #     注：它和它的传递依赖 audio_session 的 Android 端都已自带 AGP8 所需的
-  #         namespace 与 Java 17 目标，逐个核对过源码，无需在 CI 打补丁。
   just_audio: ^0.10.6
+
+  # N4：后台播放 + 通知栏/锁屏控制。它是 N3 那个 AudioPlayer 的「外挂」——
+  #     把 just_audio 接到系统音频会话上，不需要改播放逻辑本身。
+  #
+  #     为什么它需要单独一个节点验证（而不是和 N3 一起加）：
+  #       · 它会向 manifest 注入 Service + Receiver + 3 条权限
+  #       · 它要求 App 的启动 Activity 换成 AudioServiceActivity 的子类
+  #       · 它会带来一条新的依赖链（audio_service → flutter_cache_manager → sqflite）
+  #     这三件事任何一件出错，都会让「能装能开但一播就崩」或「通知栏不出现」。
+  #
+  #     ⚠️ 版本号 0.0.1-beta.NN 看似很久没更新，但已逐行核对：
+  #        它与 just_audio 0.10.6 的 sdk/flutter/audio_session 约束完全一致，
+  #        传递出来的 sqflite_android 也已自带 namespace（无需 CI 补丁）。
+  just_audio_background: ^0.0.1-beta.17
 
 dev_dependencies:
   flutter_test:
