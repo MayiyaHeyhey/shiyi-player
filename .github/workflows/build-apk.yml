@@ -1,0 +1,101 @@
+# ============================================================================
+#  十一 · 接着奏乐 —— 云端自动编译 APK
+#
+#  为什么走云端：本机不需要安装 Android Studio / SDK / JDK（省下 3GB+ 和一堆配置），
+#  代码推上来，GitHub 的服务器替我们编译，编好直接下载 apk 装手机。
+#
+#  核心技巧：不手写 android/ 工程目录，而是让 CI 用「当前 Flutter 版本」自己生成
+#  （flutter create）。这样 Gradle / AGP / Kotlin 版本永远和 Flutter 匹配，
+#  不会被"手写模板版本过时"坑到。
+# ============================================================================
+
+name: 构建 APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 连续提交时，取消上一次还没跑完的构建，省时间
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译 release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 2. 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 3. 安装 Flutter（stable）
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 4. 显示版本
+        run: flutter --version
+
+      - name: 5. 生成 Android 工程目录（用当前 Flutter 版本，保证版本匹配）
+        run: flutter create --org com.shiyi --project-name shiyi_player --platforms=android --no-pub .
+
+      - name: 6. 校验 main.dart 没被模板覆盖
+        run: |
+          if ! grep -q "SHIYI_PLAYER_N1" lib/main.dart; then
+            echo "::error::lib/main.dart 被 flutter create 覆盖了！请检查第 5 步行为。"
+            exit 1
+          fi
+          echo "✅ main.dart 完好"
+
+      - name: 7. 把应用显示名改成「接着奏乐」
+        run: |
+          sed -i 's/android:label="[^"]*"/android:label="接着奏乐"/' android/app/src/main/AndroidManifest.xml
+          if grep -q 'android:label="接着奏乐"' android/app/src/main/AndroidManifest.xml; then
+            echo "✅ 应用名已设为「接着奏乐」"
+          else
+            echo "::warning::应用名替换未生效，将显示为默认名（不影响安装）"
+          fi
+
+      - name: 8. 预生成 debug 签名（release 用 debug 签名，保证可以直接安装）
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          echo "✅ 签名就绪"
+
+      - name: 9. 拉取依赖
+        run: flutter pub get
+
+      - name: 10. 静态检查（只提示，不阻断构建）
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
+
+      - name: 11. 编译 release APK
+        run: flutter build apk --release
+
+      - name: 12. 报告产物
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          ls -lh "$APK"
+          echo "APK 大小：$(du -h "$APK" | cut -f1)"
+
+      - name: 13. 上传 APK（构建完在页面上下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiyi-player-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+          if-no-files-found: error
