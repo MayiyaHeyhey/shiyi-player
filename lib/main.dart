@@ -1,9 +1,9 @@
 // ============================================================================
 //  十一 · 接着奏乐 —— 手机版
-//  N3 节点：曲库 → 能出声（前台播放）
+//  N4 节点：前台能出声 → 后台也能响（后台播放 + 通知栏控制）
 //
-//  本节点只解决「点歌能放 + 能暂停 + 能拖进度 + 能上下曲」，
-//  视觉打磨与后台播放都留给后面的节点。
+//  本节点只解决「切出去 / 锁屏 / 退出 App 后音乐不停 + 通知栏能控制」，
+//  视觉打磨与通知栏上下曲留给后面的节点。
 //
 //  ⚠️ 已经踩过的坑，改动时不要回退（完整记录见 节点进度.md）：
 //   1) 模型类名是 SongModel，不是 AudioModel（后者是插件内部基类，2.9.0 未导出）。
@@ -12,19 +12,25 @@
 //      三处均由 CI 第 10 步打补丁修复，不要删那一步。
 //   3) 插件的 querySongs() 不带 IS_MUSIC 过滤，铃声/提示音会一起捞出来 ——
 //      本文件在 Dart 侧按 isMusic 过滤，并带兜底（滤完为空则退回全量，绝不给空白页）。
-//   4) 【N3 新增】分区存储下 MediaStore 的 _data 文件路径不保证可读 ——
+//   4) 分区存储下 MediaStore 的 _data 文件路径不保证可读 ——
 //      播放走「content:// URI 优先，文件路径降级」两级链，见 _play()。
+//   5) 【N4 新增】后台播放由 just_audio_background 接管，代价是三处配套改动，
+//      缺任何一处都会「能装能开但通知栏不出现」：
+//        · 本文件：main() 里 await JustAudioBackground.init() + 每个音源挂 MediaItem
+//        · CI：manifest 注入 AudioService / MediaButtonReceiver 与 3 条权限
+//        · CI：把 MainActivity 的父类换成 AudioServiceActivity（见 build-apk.yml 第 7 步）
 //
-//  标记串：SHIYI_PLAYER_N3 —— CI 会检查它，防止本文件被模板覆盖。
+//  标记串：SHIYI_PLAYER_N4 —— CI 会检查它，防止本文件被模板覆盖。
 // ============================================================================
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:just_audio_background/just_audio_background.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.3.0 · N3';
+const String kBuild = 'v0.4.0 · N4';
 
 // ===== 设计令牌：与网页版 index.html 一致（墨黑 + 黄铜）=====
 const Color kInk = Color(0xFF0B0A09); // 暖黑底
@@ -59,16 +65,27 @@ String _mmss(dynamic raw) {
 /// 界面只吃这个类 —— 插件对象一律在加载阶段就被拆成纯字符串，
 /// 这样界面层永远不会因为插件字段为 null 而崩。
 class _Song {
-  _Song(this.title, this.artist, this.dur, this.isMusic, this.uri, this.data);
+  _Song(this.title, this.artist, this.dur, this.durMs, this.isMusic, this.uri,
+      this.data);
   final String title;
   final String artist;
-  final String dur; // 已格式化好的 m:ss
+  final String dur; // 已格式化好的 m:ss（列表右侧显示用）
+  final int durMs; // 原始毫秒（N4：交给通知栏当进度条总长用）
   final bool isMusic;
   final String uri; // content://media/external/audio/media/<id>
   final String data; // 真实文件路径（降级用）
 }
 
-void main() {
+Future<void> main() async {
+  // N4：后台播放的前提 —— 先把音频会话挂到系统媒体会话上。
+  // ⚠️ 必须 await 完成后再 runApp，否则第一首歌可能来不及挂上通知栏。
+  WidgetsFlutterBinding.ensureInitialized();
+  await JustAudioBackground.init(
+    androidNotificationChannelId: 'com.shiyi.shiyi_player.channel.audio',
+    androidNotificationChannelName: '接着奏乐 · 播放控制',
+    // 播放时通知不可被划掉（避免误划导致「音乐还在响但控制入口没了」）
+    androidNotificationOngoing: true,
+  );
   runApp(const ShiyiPlayerApp());
 }
 
@@ -105,7 +122,7 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> {
   final OnAudioQuery _query = OnAudioQuery();
 
-  // N3：前台播放器。一个实例够用，不需要额外权限，也不需要后台服务。
+  // N3：前台播放器。一个实例够用（just_audio_background 也只支持单实例）。
   final AudioPlayer _player = AudioPlayer();
   StreamSubscription<ProcessingState>? _psSub;
 
@@ -240,11 +257,11 @@ class _LibraryPageState extends State<LibraryPage> {
       artist = '';
     }
 
-    String dur = '--:--';
+    int durMs = 0;
     try {
-      dur = _mmss(m.duration);
+      durMs = _intOf(m.duration);
     } catch (e) {
-      dur = '--:--';
+      durMs = 0;
     }
 
     bool isMusic = true; // 取不到就当它是音乐，宁可多显示也不漏
@@ -268,8 +285,8 @@ class _LibraryPageState extends State<LibraryPage> {
       data = '';
     }
 
-    return _Song(title.isEmpty ? '未知曲目' : title, artist, dur, isMusic, uri,
-        data);
+    return _Song(title.isEmpty ? '未知曲目' : title, artist, _mmss(durMs), durMs,
+        isMusic, uri, data);
   }
 
   // ===== 播放 =====
@@ -282,12 +299,24 @@ class _LibraryPageState extends State<LibraryPage> {
       _dragMs = null;
     });
 
+    // N4：通知栏/锁屏要显示曲名歌手，必须给音源挂 MediaItem。
+    // id 用 uri（或退化成文件路径）—— 同一首歌必须稳定得到同一个 id，
+    // 否则系统会把「同一首歌」当成两首，出现重复的通知或封面缓存错乱。
+    final String mediaId = s.uri.isNotEmpty ? s.uri : s.data;
+    final MediaItem tag = MediaItem(
+      id: mediaId.isEmpty ? 'idx-$i' : mediaId,
+      title: s.title,
+      artist: s.artist.isEmpty ? '未知歌手' : s.artist,
+      duration: s.durMs > 0 ? Duration(milliseconds: s.durMs) : null,
+    );
+
     bool ok = false;
 
     // ① 首选 content:// URI —— 分区存储下最稳，且不需要文件路径权限
     if (s.uri.isNotEmpty) {
       try {
-        await _player.setAudioSource(AudioSource.uri(Uri.parse(s.uri)));
+        await _player.setAudioSource(
+            AudioSource.uri(Uri.parse(s.uri), tag: tag));
         ok = true;
       } catch (e) {
         ok = false;
@@ -295,9 +324,11 @@ class _LibraryPageState extends State<LibraryPage> {
     }
 
     // ② 降级：真实文件路径（媒体文件在 READ_MEDIA_AUDIO 授权下可直读）
+    //    注意这里用 AudioSource.file 而不是 setFilePath —— 后者没有 tag 参数，
+    //    走它就会丢掉 MediaItem，通知栏会变成没有标题的空壳。
     if (!ok && s.data.isNotEmpty) {
       try {
-        await _player.setFilePath(s.data);
+        await _player.setAudioSource(AudioSource.file(s.data, tag: tag));
         ok = true;
       } catch (e) {
         ok = false;
