@@ -11,6 +11,8 @@
 #  各节点对应的工作流差异：
 #    N1：只有骨架，不需要任何权限
 #    N2：注入 READ_MEDIA_AUDIO（安卓 13+ 读音乐必需）+ 老插件 AGP8 兼容兜底
+#    N3：摘掉 media3 带进来的 INTERNET 权限（只读本地，不联网）
+#    N4：后台播放三件套（3 条权限 / AudioService+MediaButtonReceiver / Activity 换父类）
 # ============================================================================
 
 name: 构建 APK
@@ -121,6 +123,80 @@ jobs:
 
           echo "--- 最终 manifest ---"
           cat "$MF"
+
+      # ----------------------------------------------------------------------
+      #  N4 = 后台播放，靠 just_audio_background（底层是 audio_service）。
+      #  它在 Android 侧需要三样东西，缺任何一样都会「能装能开、但通知栏不出现」：
+      #    ① 三条权限
+      #    ② AudioService（前台服务）+ MediaButtonReceiver（耳机线控按键）
+      #    ③ App 的启动 Activity 必须是 AudioServiceActivity 的子类
+      # ----------------------------------------------------------------------
+      - name: 7b. N4：后台播放 —— 注入 Service/Receiver/权限 + 改 Activity 父类
+        run: |
+          MF=android/app/src/main/AndroidManifest.xml
+          KT=$(find android/app/src/main/kotlin -name 'MainActivity.kt' | head -n1)
+
+          # ---- ① 三条权限 ----
+          #  WAKE_LOCK                          播放期间保持 CPU 唤醒（锁屏后不停）
+          #  FOREGROUND_SERVICE                 允许起前台服务
+          #  FOREGROUND_SERVICE_MEDIA_PLAYBACK  targetSdk>=34 必需，声明服务类型
+          #  （三条都是普通权限，不弹窗；只有 POST_NOTIFICATIONS 才弹窗，
+          #    而媒体会话通知豁免它，所以本节点不会新增任何权限弹窗）
+          if ! grep -q 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' "$MF"; then
+            sed -i 's|</manifest>|    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>\n</manifest>|' "$MF"
+          fi
+
+          # ---- ② Service + Receiver ----
+          # tools:ignore="Instantiatable" 消掉 lint 的「类来自依赖库、无法实例化」告警。
+          # xmlns:tools 在第 7 步（摘 INTERNET 时）已注入，这里直接用。
+          if ! grep -q 'audioservice.AudioService' "$MF"; then
+            sed -i 's|</application>|        <service android:name="com.ryanheise.audioservice.AudioService"\n            android:foregroundServiceType="mediaPlayback"\n            android:exported="true"\n            tools:ignore="Instantiatable">\n            <intent-filter>\n                <action android:name="android.media.browse.MediaBrowserService" />\n            </intent-filter>\n        </service>\n        <receiver android:name="com.ryanheise.audioservice.MediaButtonReceiver"\n            android:exported="true"\n            tools:ignore="Instantiatable">\n            <intent-filter>\n                <action android:name="android.intent.action.MEDIA_BUTTON" />\n            </intent-filter>\n        </receiver>\n</application>|' "$MF"
+          fi
+
+          # ---- ③ 启动 Activity 换成 AudioServiceActivity 的子类 ----
+          # 官方 README 的做法是直接把 manifest 里 activity 的 android:name 改成
+          # com.ryanheise.audioservice.AudioServiceActivity。**我们偏不那样做**：
+          #   · 改 manifest  →  错到运行期才暴露（装到手机上才发现一开就崩）
+          #   · 改 Kotlin 父类 → 错在编译期就暴露（构建那一步直接拦下）
+          # 两者最终效果等价（MainActivity 仍是 AudioServiceActivity 的子类），
+          # 但后者让错误提前。这是本轮刻意选的一条更稳的路。
+          echo "MainActivity.kt: $KT"
+          if [ -z "$KT" ]; then
+            echo "::error::找不到 MainActivity.kt，第 5 步 flutter create 可能没生成"
+            exit 1
+          fi
+          sed -i 's|import io.flutter.embedding.android.FlutterActivity|import com.ryanheise.audioservice.AudioServiceActivity|' "$KT"
+          sed -i 's|: FlutterActivity()|: AudioServiceActivity()|' "$KT"
+
+          echo "========== 改后：MainActivity.kt =========="
+          cat "$KT"
+          echo "========== 改后：manifest（第 7b 步结束后）=========="
+          cat "$MF"
+
+          # ---- 自检：任何一项没生效立刻失败 ----
+          FAIL=0
+          for P in WAKE_LOCK FOREGROUND_SERVICE FOREGROUND_SERVICE_MEDIA_PLAYBACK; do
+            if ! grep -q "android.permission.$P\"" "$MF"; then
+              echo "::error::权限 $P 未注入"; FAIL=1
+            fi
+          done
+          if ! grep -q 'com.ryanheise.audioservice.AudioService"' "$MF"; then
+            echo "::error::AudioService 未注入"; FAIL=1
+          fi
+          if ! grep -q 'MediaButtonReceiver' "$MF"; then
+            echo "::error::MediaButtonReceiver 未注入"; FAIL=1
+          fi
+          if ! grep -q 'foregroundServiceType="mediaPlayback"' "$MF"; then
+            echo "::error::foregroundServiceType 未声明，targetSdk 34+ 起会拒绝启动该服务"; FAIL=1
+          fi
+          if ! grep -q 'AudioServiceActivity' "$KT"; then
+            echo "::error::MainActivity 未改成 AudioServiceActivity 子类，通知栏不会出现"; FAIL=1
+          fi
+          if grep -q 'FlutterActivity' "$KT"; then
+            echo "::error::MainActivity.kt 里还残留 FlutterActivity 引用"; FAIL=1
+          fi
+          if [ "$FAIL" != "0" ]; then exit 1; fi
+          echo "✅ N4 后台播放所需的 manifest / Activity 改造全部就位"
 
       - name: 8. 预生成 debug 签名（release 用 debug 签名，保证可以直接安装）
         run: |
