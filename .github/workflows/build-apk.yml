@@ -52,7 +52,7 @@ jobs:
       - name: 5. 生成 Android 工程目录（用当前 Flutter 版本，保证版本匹配）
         run: flutter create --org com.shiyi --project-name shiyi_player --platforms=android --no-pub .
 
-      - name: 6. 校验 main.dart 没被模板覆盖
+      - name: 6. 校验 main.dart + 重置模板测试文件
         run: |
           if ! grep -q "SHIYI_PLAYER_" lib/main.dart; then
             echo "::error::lib/main.dart 被 flutter create 覆盖了！请检查第 5 步行为。"
@@ -60,6 +60,18 @@ jobs:
           fi
           echo "✅ main.dart 完好，节点标记："
           grep -o "SHIYI_PLAYER_N[0-9]*" lib/main.dart | head -1
+
+          # flutter create 发现 test/ 不存在时，会补一个引用模板类 MyApp 的 widget_test.dart。
+          # 我们的 main.dart 里没有 MyApp —— flutter analyze 会报 creation_with_non_type。
+          # 这里重置成不依赖任何业务类的冒烟测试。
+          mkdir -p test
+          printf '%s\n' \
+            "import 'package:flutter_test/flutter_test.dart';" \
+            "" \
+            "void main() {" \
+            "  test('smoke', () { expect(1 + 1, 2); });" \
+            "}" > test/widget_test.dart
+          echo "✅ test/widget_test.dart 已重置（无业务依赖）"
 
       - name: 7. 改应用名 + 注入音乐读取权限
         run: |
@@ -100,27 +112,73 @@ jobs:
       - name: 9. 拉取依赖
         run: flutter pub get
 
-      - name: 10. 老插件 AGP8 兼容兜底 + 依赖诊断
+      # ----------------------------------------------------------------------
+      #  老插件 on_audio_query_android 1.1.0 有两处硬伤，必须在这里打补丁。
+      #  为什么在 CI 打而不是 fork：pub 缓存每次构建都是全新的，
+      #  补丁写在这里才能保证每次构建产物一致、可复现。
+      #
+      #  硬伤①  AGP8 起 namespace 必填，且不再允许从 manifest 的 package 推导。
+      #         插件只在 manifest 写了 package，build.gradle 里没有 namespace，
+      #         构建直接死在 "Namespace not specified"。
+      #  硬伤②  插件权限数组在安卓 13+ 上要 READ_MEDIA_IMAGES、12 及以下要
+      #         WRITE_EXTERNAL_STORAGE，而它用 permissions.all{} 判断「全授才通过」。
+      #         我们没声明这两项（一个音乐播放器也不该要相册权限），
+      #         结果是权限永远返回「未授权」——App 能装能开，但永远卡在授权页。
+      # ----------------------------------------------------------------------
+      - name: 10. AGP8 + 权限 补丁（老插件两处硬伤）
         run: |
           CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
-          echo "PUB_CACHE=$CACHE"
+          PLUG=$(find "$CACHE/hosted/pub.dev" -maxdepth 1 -type d -name 'on_audio_query_android-*' | head -n1)
+          if [ -z "$PLUG" ]; then
+            echo "::error::pub-cache 里找不到 on_audio_query_android，补丁无法进行"
+            exit 1
+          fi
+          echo "插件目录：$PLUG"
 
-          echo "--- on_audio_query 落地位置 ---"
-          find "$CACHE" -maxdepth 6 -type d -name "on_audio_query*" 2>/dev/null | head -5 || true
+          BG="$PLUG/android/build.gradle"
+          MF="$PLUG/android/src/main/AndroidManifest.xml"
+          PK="$PLUG/android/src/main/kotlin/com/lucasjosino/on_audio_query/controllers/PermissionController.kt"
 
-          echo "--- 清掉插件 manifest 里 AGP8 已不再允许的 package 属性（没有就跳过）---"
-          find "$CACHE" -path "*on_audio_query*/android/src/main/AndroidManifest.xml" 2>/dev/null \
-            | while read -r f; do
-                echo "patch: $f"
-                sed -i 's/ *package="[^"]*"//' "$f" || true
-              done
+          echo "========== 补丁前：build.gradle =========="
+          cat "$BG"
 
-          echo "--- 检查插件 build.gradle 是否声明 namespace（AGP8 需要）---"
-          for g in $(find "$CACHE" -path "*on_audio_query*/android/build.gradle" 2>/dev/null); do
-            echo "gradle: $g"
-            grep -n "namespace" "$g" || echo "  ::warning::未声明 namespace —— Flutter 通常会兜底补上"
-          done
-          echo "✅ 兜底完成（本步即使有问题也不阻断构建）"
+          # ---- 硬伤① 修复 ----
+          if ! grep -q 'namespace' "$BG"; then
+            sed -i "s|^android {|android {\n    namespace 'com.lucasjosino.on_audio_query'|" "$BG"
+          fi
+          # 老式 xxxVersion 写法换成 AGP8 写法
+          sed -i 's/compileSdkVersion *[0-9]\+/compileSdk 36/' "$BG"
+          sed -i 's/minSdkVersion *[0-9]\+/minSdk 24/' "$BG"
+          # 插件源码用到 ActivityCompat/ContextCompat，却没声明 androidx.core，补上防坑
+          if ! grep -q 'androidx.core:core' "$BG"; then
+            sed -i "s|^dependencies {|dependencies {\n    implementation 'androidx.core:core:1.13.1'|" "$BG"
+          fi
+          # manifest 里的 package 属性 AGP8 已移除支持，删掉
+          sed -i 's/ *package="[^"]*"//' "$MF"
+
+          # ---- 硬伤② 修复 ----
+          # 删掉多余的两项权限，并把数组最后一行的尾逗号去掉（数组只剩一个元素）
+          sed -i -e '/READ_MEDIA_IMAGES/d' \
+                 -e 's/Manifest\.permission\.READ_MEDIA_AUDIO,$/Manifest.permission.READ_MEDIA_AUDIO/' "$PK"
+          sed -i -e '/WRITE_EXTERNAL_STORAGE/d' \
+                 -e 's/Manifest\.permission\.READ_EXTERNAL_STORAGE,$/Manifest.permission.READ_EXTERNAL_STORAGE/' "$PK"
+
+          echo "========== 补丁后：build.gradle =========="
+          cat "$BG"
+          echo "========== 补丁后：权限数组 =========="
+          sed -n '18,40p' "$PK"
+
+          # ---- 自检：任何一项没生效就立刻失败，不浪费一轮构建 ----
+          FAIL=0
+          if ! grep -q "namespace 'com.lucasjosino.on_audio_query'" "$BG"; then echo "::error::namespace 未注入"; FAIL=1; fi
+          if ! grep -q "compileSdk 36" "$BG"; then echo "::error::compileSdk 未替换"; FAIL=1; fi
+          if ! grep -q "androidx.core:core" "$BG"; then echo "::error::androidx.core 未补上"; FAIL=1; fi
+          if ! grep -q "READ_MEDIA_AUDIO" "$PK"; then echo "::error::READ_MEDIA_AUDIO 被误删"; FAIL=1; fi
+          if ! grep -q "READ_EXTERNAL_STORAGE" "$PK"; then echo "::error::READ_EXTERNAL_STORAGE 被误删"; FAIL=1; fi
+          if grep -q "READ_MEDIA_IMAGES" "$PK"; then echo "::error::READ_MEDIA_IMAGES 没删掉，安卓13+ 会永远卡授权页"; FAIL=1; fi
+          if grep -q "WRITE_EXTERNAL_STORAGE" "$PK"; then echo "::error::WRITE_EXTERNAL_STORAGE 没删掉，安卓12- 会永远卡授权页"; FAIL=1; fi
+          if [ "$FAIL" != "0" ]; then exit 1; fi
+          echo "✅ 两处硬伤均已修好"
 
       - name: 11. 静态检查（只提示，不阻断构建）
         run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
