@@ -7,6 +7,10 @@
 #  核心技巧：不手写 android/ 工程目录，而是让 CI 用「当前 Flutter 版本」自己生成
 #  （flutter create）。这样 Gradle / AGP / Kotlin 版本永远和 Flutter 匹配，
 #  不会被"手写模板版本过时"坑到。
+#
+#  各节点对应的工作流差异：
+#    N1：只有骨架，不需要任何权限
+#    N2：注入 READ_MEDIA_AUDIO（安卓 13+ 读音乐必需）+ 老插件 AGP8 兼容兜底
 # ============================================================================
 
 name: 构建 APK
@@ -50,20 +54,36 @@ jobs:
 
       - name: 6. 校验 main.dart 没被模板覆盖
         run: |
-          if ! grep -q "SHIYI_PLAYER_N1" lib/main.dart; then
+          if ! grep -q "SHIYI_PLAYER_" lib/main.dart; then
             echo "::error::lib/main.dart 被 flutter create 覆盖了！请检查第 5 步行为。"
             exit 1
           fi
-          echo "✅ main.dart 完好"
+          echo "✅ main.dart 完好，节点标记："
+          grep -o "SHIYI_PLAYER_N[0-9]*" lib/main.dart | head -1
 
-      - name: 7. 把应用显示名改成「接着奏乐」
+      - name: 7. 改应用名 + 注入音乐读取权限
         run: |
-          sed -i 's/android:label="[^"]*"/android:label="接着奏乐"/' android/app/src/main/AndroidManifest.xml
-          if grep -q 'android:label="接着奏乐"' android/app/src/main/AndroidManifest.xml; then
-            echo "✅ 应用名已设为「接着奏乐」"
-          else
-            echo "::warning::应用名替换未生效，将显示为默认名（不影响安装）"
+          MF=android/app/src/main/AndroidManifest.xml
+          ls -l "$MF"
+
+          # 应用显示名
+          sed -i 's/android:label="[^"]*"/android:label="接着奏乐"/' "$MF"
+
+          # 音乐读取权限：分 Android 版本写，缺一不可
+          if ! grep -q "READ_MEDIA_AUDIO" "$MF"; then
+            sed -i 's|</manifest>|    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n</manifest>|' "$MF"
           fi
+
+          echo "--- 校验 ---"
+          grep -q 'android:label="接着奏乐"' "$MF" \
+            && echo "✅ 应用名 = 接着奏乐" \
+            || { echo "::error::应用名替换失败"; exit 1; }
+          grep -q "READ_MEDIA_AUDIO" "$MF" \
+            && echo "✅ 已注入 READ_MEDIA_AUDIO" \
+            || { echo "::error::音乐权限注入失败，装上也读不到歌"; exit 1; }
+          grep -q "READ_EXTERNAL_STORAGE" "$MF" \
+            && echo "✅ 已注入 READ_EXTERNAL_STORAGE (maxSdk=32)" \
+            || echo "::warning::旧安卓兼容权限没注入（新机无影响）"
 
       - name: 8. 预生成 debug 签名（release 用 debug 签名，保证可以直接安装）
         run: |
@@ -80,22 +100,58 @@ jobs:
       - name: 9. 拉取依赖
         run: flutter pub get
 
-      - name: 10. 静态检查（只提示，不阻断构建）
+      - name: 10. 老插件 AGP8 兼容兜底 + 依赖诊断
+        run: |
+          CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+          echo "PUB_CACHE=$CACHE"
+
+          echo "--- on_audio_query 落地位置 ---"
+          find "$CACHE" -maxdepth 6 -type d -name "on_audio_query*" 2>/dev/null | head -5 || true
+
+          echo "--- 清掉插件 manifest 里 AGP8 已不再允许的 package 属性（没有就跳过）---"
+          find "$CACHE" -path "*on_audio_query*/android/src/main/AndroidManifest.xml" 2>/dev/null \
+            | while read -r f; do
+                echo "patch: $f"
+                sed -i 's/ *package="[^"]*"//' "$f" || true
+              done
+
+          echo "--- 检查插件 build.gradle 是否声明 namespace（AGP8 需要）---"
+          for g in $(find "$CACHE" -path "*on_audio_query*/android/build.gradle" 2>/dev/null); do
+            echo "gradle: $g"
+            grep -n "namespace" "$g" || echo "  ::warning::未声明 namespace —— Flutter 通常会兜底补上"
+          done
+          echo "✅ 兜底完成（本步即使有问题也不阻断构建）"
+
+      - name: 11. 静态检查（只提示，不阻断构建）
         run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
 
-      - name: 11. 编译 release APK
-        run: flutter build apk --release
+      - name: 12. 编译 release APK（全程留日志）
+        run: |
+          set -o pipefail
+          flutter build apk --release 2>&1 | tee build.log
 
-      - name: 12. 报告产物
+      - name: 13. 报告产物
         run: |
           APK=build/app/outputs/flutter-apk/app-release.apk
           ls -lh "$APK"
           echo "APK 大小：$(du -h "$APK" | cut -f1)"
 
-      - name: 13. 上传 APK（构建完在页面上下载）
+      - name: 14. 上传 APK（构建完在页面上下载）
         uses: actions/upload-artifact@v4
         with:
           name: shiyi-player-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
           if-no-files-found: error
+
+      # 关键兜底：把构建日志也当成产物传上去。
+      # 这样即使本机打不开 github.com 网页、手里也没有 token，
+      # 依然能通过产物通道把日志取下来排障。
+      - name: 15. 上传构建日志（无论成败，便于离线排障）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 30
+          if-no-files-found: ignore
