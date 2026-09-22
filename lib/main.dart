@@ -1,26 +1,30 @@
 // ============================================================================
 //  十一 · 接着奏乐 —— 手机版
-//  N2 节点：扫描手机里的音乐，把曲库列出来
+//  N3 节点：曲库 → 能出声（前台播放）
 //
-//  本节点只解决「扫得到 + 列得出来」两件事，视觉打磨留给后面的节点。
+//  本节点只解决「点歌能放 + 能暂停 + 能拖进度 + 能上下曲」，
+//  视觉打磨与后台播放都留给后面的节点。
 //
-//  ⚠️ 三个已经踩过的坑，改动时不要回退：
-//   1) 模型类名是 SongModel，不是 AudioModel。
-//      （AudioModel 只是插件内部基类，2.9.0 没有导出它 —— 写错名字会直接编译失败）
-//   2) on_audio_query_android 1.1.0 的权限数组在安卓 13+ 上包含 READ_MEDIA_IMAGES，
-//      低版本包含 WRITE_EXTERNAL_STORAGE。这两项我们没在清单里声明，
-//      而插件是 `permissions.all{...}` 全通过才算授权 —— 结果就是「永远卡在授权页」。
-//      CI 已打补丁把那两项删掉，只留 READ_MEDIA_AUDIO / READ_EXTERNAL_STORAGE，与清单一致。
-//   3) 插件的 querySongs() 不带 IS_MUSIC 过滤，会把铃声/提示音/录音一起捞出来。
-//      本文件在 Dart 侧按 isMusic 过滤，并带兜底（滤完为空就退回全量，绝不给空白页）。
+//  ⚠️ 已经踩过的坑，改动时不要回退（完整记录见 节点进度.md）：
+//   1) 模型类名是 SongModel，不是 AudioModel（后者是插件内部基类，2.9.0 未导出）。
+//   2) on_audio_query_android 1.1.0 在 AGP8 下缺 namespace、JVM 目标不一致，
+//      且权限数组多要 READ_MEDIA_IMAGES / WRITE_EXTERNAL_STORAGE（会导致永远卡授权页）。
+//      三处均由 CI 第 10 步打补丁修复，不要删那一步。
+//   3) 插件的 querySongs() 不带 IS_MUSIC 过滤，铃声/提示音会一起捞出来 ——
+//      本文件在 Dart 侧按 isMusic 过滤，并带兜底（滤完为空则退回全量，绝不给空白页）。
+//   4) 【N3 新增】分区存储下 MediaStore 的 _data 文件路径不保证可读 ——
+//      播放走「content:// URI 优先，文件路径降级」两级链，见 _play()。
 //
-//  标记串：SHIYI_PLAYER_N2 —— CI 会检查它，防止本文件被模板覆盖。
+//  标记串：SHIYI_PLAYER_N3 —— CI 会检查它，防止本文件被模板覆盖。
 // ============================================================================
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.2.1 · N2';
+const String kBuild = 'v0.3.0 · N3';
 
 // ===== 设计令牌：与网页版 index.html 一致（墨黑 + 黄铜）=====
 const Color kInk = Color(0xFF0B0A09); // 暖黑底
@@ -55,11 +59,13 @@ String _mmss(dynamic raw) {
 /// 界面只吃这个类 —— 插件对象一律在加载阶段就被拆成纯字符串，
 /// 这样界面层永远不会因为插件字段为 null 而崩。
 class _Song {
-  _Song(this.title, this.artist, this.dur, this.isMusic);
+  _Song(this.title, this.artist, this.dur, this.isMusic, this.uri, this.data);
   final String title;
   final String artist;
-  final String dur;
+  final String dur; // 已格式化好的 m:ss
   final bool isMusic;
+  final String uri; // content://media/external/audio/media/<id>
+  final String data; // 真实文件路径（降级用）
 }
 
 void main() {
@@ -99,16 +105,36 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> {
   final OnAudioQuery _query = OnAudioQuery();
 
+  // N3：前台播放器。一个实例够用，不需要额外权限，也不需要后台服务。
+  final AudioPlayer _player = AudioPlayer();
+  StreamSubscription<ProcessingState>? _psSub;
+
   // checking | denied | loading | ready | empty | failed
   String _stage = 'checking';
   List<_Song> _songs = <_Song>[];
   int _filteredOut = 0;
   String _err = '';
 
+  int _index = -1; // 正在播第几首，-1 = 没在播
+  double? _dragMs; // 拖动进度条时的临时值（避免被 positionStream 拉回）
+
   @override
   void initState() {
     super.initState();
+    // 播完自动下一首
+    _psSub = _player.processingStateStream.listen((ProcessingState st) {
+      if (st == ProcessingState.completed && mounted) {
+        _next();
+      }
+    });
     _boot();
+  }
+
+  @override
+  void dispose() {
+    _psSub?.cancel();
+    _player.dispose();
+    super.dispose();
   }
 
   Future<void> _boot() async {
@@ -154,6 +180,15 @@ class _LibraryPageState extends State<LibraryPage> {
     setState(() {
       _stage = 'loading';
     });
+    // 重新扫描后曲目可能变了，停掉当前播放并把状态清干净，避免"声音还在响但界面找不到它"
+    try {
+      await _player.stop();
+    } catch (e) {
+      // 播放器还没初始化过，忽略
+    }
+    _index = -1;
+    _dragMs = null;
+
     try {
       // 不传查询参数，用插件默认行为（外部存储 / 按标题升序），减少 API 签名差异风险。
       final List<SongModel> raw = await _query.querySongs();
@@ -161,8 +196,7 @@ class _LibraryPageState extends State<LibraryPage> {
 
       // 只留媒体库标记为「音乐」的，甩掉铃声 / 提示音 / 录音。
       // 兜底：万一全被滤掉（个别机型 is_music 全为 0），就退回全量，绝不显示空白。
-      final List<_Song> music =
-          all.where((_Song s) => s.isMusic).toList();
+      final List<_Song> music = all.where((_Song s) => s.isMusic).toList();
       final List<_Song> kept = music.isEmpty ? all : music;
 
       kept.sort((_Song a, _Song b) =>
@@ -220,8 +254,84 @@ class _LibraryPageState extends State<LibraryPage> {
       isMusic = true;
     }
 
-    return _Song(title.isEmpty ? '未知曲目' : title, artist, dur, isMusic);
+    String uri = '';
+    try {
+      uri = _txt(m.uri).trim();
+    } catch (e) {
+      uri = '';
+    }
+
+    String data = '';
+    try {
+      data = _txt(m.data).trim();
+    } catch (e) {
+      data = '';
+    }
+
+    return _Song(title.isEmpty ? '未知曲目' : title, artist, dur, isMusic, uri,
+        data);
   }
+
+  // ===== 播放 =====
+
+  Future<void> _play(int i) async {
+    if (i < 0 || i >= _songs.length) return;
+    final _Song s = _songs[i];
+    setState(() {
+      _index = i;
+      _dragMs = null;
+    });
+
+    bool ok = false;
+
+    // ① 首选 content:// URI —— 分区存储下最稳，且不需要文件路径权限
+    if (s.uri.isNotEmpty) {
+      try {
+        await _player.setAudioSource(AudioSource.uri(Uri.parse(s.uri)));
+        ok = true;
+      } catch (e) {
+        ok = false;
+      }
+    }
+
+    // ② 降级：真实文件路径（媒体文件在 READ_MEDIA_AUDIO 授权下可直读）
+    if (!ok && s.data.isNotEmpty) {
+      try {
+        await _player.setFilePath(s.data);
+        ok = true;
+      } catch (e) {
+        ok = false;
+      }
+    }
+
+    if (!ok) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('这首播不了：${s.title}')),
+      );
+      return;
+    }
+
+    try {
+      await _player.play();
+    } catch (e) {
+      // play() 失败不致命（例如被音频焦点打断），静默即可
+    }
+  }
+
+  void _next() {
+    if (_songs.isEmpty) return;
+    final int n = _index < 0 ? 0 : (_index + 1) % _songs.length;
+    _play(n);
+  }
+
+  void _prev() {
+    if (_songs.isEmpty) return;
+    final int n = _index < 0 ? 0 : (_index - 1 + _songs.length) % _songs.length;
+    _play(n);
+  }
+
+  // ===== 界面 =====
 
   @override
   Widget build(BuildContext context) {
@@ -264,6 +374,7 @@ class _LibraryPageState extends State<LibraryPage> {
               ),
               const SizedBox(height: 14),
               Expanded(child: _body()),
+              if (_index >= 0 && _index < _songs.length) _playerBar(),
             ],
           ),
         ),
@@ -391,7 +502,7 @@ class _LibraryPageState extends State<LibraryPage> {
 
   Widget _songList() {
     return ListView.separated(
-      padding: const EdgeInsets.only(bottom: 28),
+      padding: const EdgeInsets.only(bottom: 12),
       itemCount: _songs.length,
       separatorBuilder: (BuildContext c, int i) => const Divider(
         height: 1,
@@ -400,38 +511,198 @@ class _LibraryPageState extends State<LibraryPage> {
       ),
       itemBuilder: (BuildContext c, int i) {
         final _Song m = _songs[i];
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 11),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+        final bool playing = i == _index;
+        return InkWell(
+          onTap: () {
+            _play(i);
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 11),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: <Widget>[
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        m.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          color: playing ? kBrass : kText,
+                          fontWeight:
+                              playing ? FontWeight.w600 : FontWeight.w400,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        m.artist.isEmpty ? '未知歌手' : m.artist,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, color: kMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  m.dur,
+                  style: const TextStyle(fontSize: 12, color: kBrassLight),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// 底部播放条：曲名 + 歌手 + 进度条 + 时间 + ⏮ ⏯ ⏭
+  Widget _playerBar() {
+    final _Song s = _songs[_index];
+    return Container(
+      margin: const EdgeInsets.only(top: 6, bottom: 8),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+      decoration: BoxDecoration(
+        color: kPanel,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kLine),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Row(
             children: <Widget>[
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     Text(
-                      m.title,
+                      s.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 14.5, color: kText),
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: kBrassLight,
+                      ),
                     ),
-                    const SizedBox(height: 3),
+                    const SizedBox(height: 2),
                     Text(
-                      m.artist.isEmpty ? '未知歌手' : m.artist,
+                      s.artist.isEmpty ? '未知歌手' : s.artist,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12, color: kMuted),
+                      style: const TextStyle(fontSize: 11.5, color: kMuted),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 12),
-              Text(
-                m.dur,
-                style: const TextStyle(fontSize: 12, color: kBrassLight),
+              IconButton(
+                onPressed: _prev,
+                icon: const Icon(Icons.skip_previous),
+                color: kText,
+                tooltip: '上一首',
+              ),
+              StreamBuilder<PlayerState>(
+                stream: _player.playerStateStream,
+                builder:
+                    (BuildContext c, AsyncSnapshot<PlayerState> snap) {
+                  final bool playing = snap.data?.playing ?? false;
+                  return IconButton(
+                    iconSize: 34,
+                    color: kBrass,
+                    tooltip: playing ? '暂停' : '播放',
+                    onPressed: () {
+                      if (playing) {
+                        _player.pause();
+                      } else {
+                        _player.play();
+                      }
+                    },
+                    icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                  );
+                },
+              ),
+              IconButton(
+                onPressed: _next,
+                icon: const Icon(Icons.skip_next),
+                color: kText,
+                tooltip: '下一首',
               ),
             ],
           ),
+          _progressRow(),
+        ],
+      ),
+    );
+  }
+
+  Widget _progressRow() {
+    return StreamBuilder<Duration?>(
+      stream: _player.durationStream,
+      builder: (BuildContext c1, AsyncSnapshot<Duration?> ds) {
+        final int totalMs = ds.data?.inMilliseconds ?? 0;
+        return StreamBuilder<Duration>(
+          stream: _player.positionStream,
+          builder: (BuildContext c2, AsyncSnapshot<Duration> ps) {
+            final int posMs = _dragMs?.round() ?? (ps.data?.inMilliseconds ?? 0);
+            final double maxMs = totalMs > 0 ? totalMs.toDouble() : 1.0;
+            final double val =
+                posMs.clamp(0, maxMs.toInt()).toDouble();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2.5,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 6),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 14),
+                  ),
+                  child: Slider(
+                    value: val,
+                    max: maxMs,
+                    activeColor: kBrass,
+                    inactiveColor: kLine,
+                    onChanged: totalMs > 0
+                        ? (double v) {
+                            setState(() {
+                              _dragMs = v;
+                            });
+                          }
+                        : null,
+                    onChangeEnd: totalMs > 0
+                        ? (double v) {
+                            _player.seek(Duration(milliseconds: v.round()));
+                            setState(() {
+                              _dragMs = null;
+                            });
+                          }
+                        : null,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Row(
+                    children: <Widget>[
+                      Text(
+                        _mmss(posMs),
+                        style: const TextStyle(fontSize: 11, color: kMuted),
+                      ),
+                      const Spacer(),
+                      Text(
+                        _mmss(totalMs),
+                        style: const TextStyle(fontSize: 11, color: kMuted),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
     );
