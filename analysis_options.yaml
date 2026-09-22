@@ -1,0 +1,10 @@
+# 十一 · 接着奏乐 —— 静态检查配置
+#
+# 故意不 include flutter_lints：
+#   模板默认的 analysis_options.yaml 会写 `include: package:flutter_lints/flutter.yaml`，
+#   但 flutter_lints 不在我们的 dev_dependencies 里 —— 分析器会报
+#   `include_file_not_found`，白噪音。
+#   少一个依赖 = 少一处版本冲突风险，检查项本身由 CI 的 flutter analyze 兜着。
+analyzer:
+  exclude:
+    - build/**
