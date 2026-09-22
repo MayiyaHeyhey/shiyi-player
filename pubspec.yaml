@@ -1,14 +1,25 @@
+# 十一 · 接着奏乐 —— 手机版（Android）
+#
+# 依赖策略：一个节点只加一个依赖，加完单独验证一次。
+#   N1：零依赖（只证明链路通）
+#   N2：+ on_audio_query（读系统媒体库：曲名/歌手/时长）
+#   N3 起再逐个加播放、后台控制等依赖。
+
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
+  # 不写上界，兼容未来更高版本的 Dart
   sdk: '>=3.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
+
+  # N2：查询系统媒体库里的音频（自带权限申请，Android 12/13+ 分支已内置）
+  on_audio_query: ^2.9.0
 
 dev_dependencies:
   flutter_test:
