@@ -143,8 +143,15 @@ jobs:
           cat "$BG"
 
           # ---- 硬伤① 修复 ----
-          if ! grep -q 'namespace' "$BG"; then
-            sed -i "s|^android {|android {\n    namespace 'com.lucasjosino.on_audio_query'|" "$BG"
+          #  ⚠️ 三件事必须写在同一次 sed 里，顺序可控：
+          #    a) namespace：AGP8 必填，且不再允许从 manifest 的 package 推导
+          #    b) compileOptions / kotlinOptions：插件的 Java 目标是 11（AGP 默认），
+          #       而 Flutter 把 Kotlin 目标定在 17 → Gradle 直接报
+          #       "Inconsistent JVM-target compatibility (11) vs (17)" 并中断。
+          #       两边都显式对齐到 17。写法与 Flutter 自己生成的 app/build.gradle 一致，
+          #       所以不担心 KGP 版本差异。
+          if ! grep -q "namespace 'com.lucasjosino" "$BG"; then
+            sed -i "s|^android {|android {\n    namespace 'com.lucasjosino.on_audio_query'\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n    }\n    kotlinOptions {\n        jvmTarget = '17'\n    }|" "$BG"
           fi
           # 老式 xxxVersion 写法换成 AGP8 写法
           sed -i 's/compileSdkVersion *[0-9]\+/compileSdk 36/' "$BG"
@@ -171,6 +178,8 @@ jobs:
           # ---- 自检：任何一项没生效就立刻失败，不浪费一轮构建 ----
           FAIL=0
           if ! grep -q "namespace 'com.lucasjosino.on_audio_query'" "$BG"; then echo "::error::namespace 未注入"; FAIL=1; fi
+          if ! grep -q "JavaVersion.VERSION_17" "$BG"; then echo "::error::compileOptions 未注入（JVM 目标会不一致）"; FAIL=1; fi
+          if ! grep -q "jvmTarget" "$BG"; then echo "::error::kotlinOptions.jvmTarget 未注入"; FAIL=1; fi
           if ! grep -q "compileSdk 36" "$BG"; then echo "::error::compileSdk 未替换"; FAIL=1; fi
           if ! grep -q "androidx.core:core" "$BG"; then echo "::error::androidx.core 未补上"; FAIL=1; fi
           if ! grep -q "READ_MEDIA_AUDIO" "$PK"; then echo "::error::READ_MEDIA_AUDIO 被误删"; FAIL=1; fi
