@@ -73,7 +73,7 @@ jobs:
             "}" > test/widget_test.dart
           echo "✅ test/widget_test.dart 已重置（无业务依赖）"
 
-      - name: 7. 改应用名 + 注入音乐读取权限
+      - name: 7. 改应用名 + 注入音乐读取权限 + 摘掉联网权限
         run: |
           MF=android/app/src/main/AndroidManifest.xml
           ls -l "$MF"
@@ -96,6 +96,31 @@ jobs:
           grep -q "READ_EXTERNAL_STORAGE" "$MF" \
             && echo "✅ 已注入 READ_EXTERNAL_STORAGE (maxSdk=32)" \
             || echo "::warning::旧安卓兼容权限没注入（新机无影响）"
+
+          # ---- N3：摘掉播放引擎带进来的「联网」权限 ----
+          # just_audio 底层是 androidx.media3（ExoPlayer），media3 为了支持网络流媒体，
+          # 在自己的 manifest 里声明了 android.permission.INTERNET。
+          # 我们这个播放器只读本地 content://，全程不联网 —— 留着它，
+          # 手机「应用信息 → 权限」里会出现网络相关条目，和「纯本地」的定位打架。
+          # 用 manifest merger 的 remove 指令摘掉，最终 APK 里就没有这条。
+          # 注：INTERNET 属普通权限、本来就不弹窗，这一步纯粹是为了权限列表干净。
+          if ! grep -q 'xmlns:tools' "$MF"; then
+            sed -i 's|xmlns:android="http://schemas.android.com/apk/res/android"|xmlns:android="http://schemas.android.com/apk/res/android"\n    xmlns:tools="http://schemas.android.com/tools"|' "$MF"
+          fi
+          if ! grep -q 'permission.INTERNET' "$MF"; then
+            sed -i 's|</manifest>|    <uses-permission android:name="android.permission.INTERNET" tools:node="remove"/>\n</manifest>|' "$MF"
+          fi
+
+          echo "--- N3 校验 ---"
+          grep -q 'xmlns:tools' "$MF" \
+            && echo "✅ 已声明 tools 命名空间" \
+            || { echo "::error::tools 命名空间没注入，remove 指令会被忽略"; exit 1; }
+          grep -q 'permission.INTERNET' "$MF" \
+            && echo "✅ 已声明移除 INTERNET 权限" \
+            || { echo "::error::INTERNET 移除声明失败"; exit 1; }
+
+          echo "--- 最终 manifest ---"
+          cat "$MF"
 
       - name: 8. 预生成 debug 签名（release 用 debug 签名，保证可以直接安装）
         run: |
