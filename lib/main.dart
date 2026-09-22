@@ -3,13 +3,24 @@
 //  N2 节点：扫描手机里的音乐，把曲库列出来
 //
 //  本节点只解决「扫得到 + 列得出来」两件事，视觉打磨留给后面的节点。
-//  权限说明：安卓 13（API 33）起必须用 READ_MEDIA_AUDIO 分媒体权限，
-//            由 CI 在生成 Android 工程后自动注入 AndroidManifest.xml。
+//
+//  ⚠️ 三个已经踩过的坑，改动时不要回退：
+//   1) 模型类名是 SongModel，不是 AudioModel。
+//      （AudioModel 只是插件内部基类，2.9.0 没有导出它 —— 写错名字会直接编译失败）
+//   2) on_audio_query_android 1.1.0 的权限数组在安卓 13+ 上包含 READ_MEDIA_IMAGES，
+//      低版本包含 WRITE_EXTERNAL_STORAGE。这两项我们没在清单里声明，
+//      而插件是 `permissions.all{...}` 全通过才算授权 —— 结果就是「永远卡在授权页」。
+//      CI 已打补丁把那两项删掉，只留 READ_MEDIA_AUDIO / READ_EXTERNAL_STORAGE，与清单一致。
+//   3) 插件的 querySongs() 不带 IS_MUSIC 过滤，会把铃声/提示音/录音一起捞出来。
+//      本文件在 Dart 侧按 isMusic 过滤，并带兜底（滤完为空就退回全量，绝不给空白页）。
 //
 //  标记串：SHIYI_PLAYER_N2 —— CI 会检查它，防止本文件被模板覆盖。
 // ============================================================================
 import 'package:flutter/material.dart';
 import 'package:on_audio_query/on_audio_query.dart';
+
+// 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
+const String kBuild = 'v0.2.1 · N2';
 
 // ===== 设计令牌：与网页版 index.html 一致（墨黑 + 黄铜）=====
 const Color kInk = Color(0xFF0B0A09); // 暖黑底
@@ -19,11 +30,10 @@ const Color kBrass = Color(0xFFD8A24A); // 主色·黄铜
 const Color kBrassLight = Color(0xFFF0C47C); // 亮黄铜
 const Color kText = Color(0xFFECE5D9); // 暖白字
 const Color kMuted = Color(0xFF8A8175); // 次级文字
-const Color kBrassBg = Color(0x1AD8A24A); // 10% 黄铜底
 
 // ---- 安全取值工具 ----
-// 不假设 AudioModel 各字段的可空性 / 类型，统一走 dynamic，
-// 避免"插件某字段是 String? 还是 String"这类差异导致编译失败。
+// 插件字段的可空性在不同版本间会变（String / String? / bool?），
+// 统一走 dynamic 取值 + 兜底，避免「插件某字段是不是可空」这种差异把构建搞崩。
 String _txt(dynamic v) => v == null ? '' : v.toString();
 
 int _intOf(dynamic v) {
@@ -40,6 +50,16 @@ String _mmss(dynamic raw) {
   final int m = total ~/ 60;
   final int s = total % 60;
   return '$m:${s.toString().padLeft(2, '0')}';
+}
+
+/// 界面只吃这个类 —— 插件对象一律在加载阶段就被拆成纯字符串，
+/// 这样界面层永远不会因为插件字段为 null 而崩。
+class _Song {
+  _Song(this.title, this.artist, this.dur, this.isMusic);
+  final String title;
+  final String artist;
+  final String dur;
+  final bool isMusic;
 }
 
 void main() {
@@ -81,7 +101,8 @@ class _LibraryPageState extends State<LibraryPage> {
 
   // checking | denied | loading | ready | empty | failed
   String _stage = 'checking';
-  List<AudioModel> _songs = <AudioModel>[];
+  List<_Song> _songs = <_Song>[];
+  int _filteredOut = 0;
   String _err = '';
 
   @override
@@ -134,17 +155,24 @@ class _LibraryPageState extends State<LibraryPage> {
       _stage = 'loading';
     });
     try {
-      // 不传任何查询参数，用插件默认行为，减少 API 签名差异带来的风险；
-      // 排序放到 Dart 里自己做。
-      final List<AudioModel> list =
-          List<AudioModel>.from(await _query.querySongs());
-      list.sort((AudioModel a, AudioModel b) => _txt(a.title)
-          .toLowerCase()
-          .compareTo(_txt(b.title).toLowerCase()));
+      // 不传查询参数，用插件默认行为（外部存储 / 按标题升序），减少 API 签名差异风险。
+      final List<SongModel> raw = await _query.querySongs();
+      final List<_Song> all = raw.map(_toSong).toList();
+
+      // 只留媒体库标记为「音乐」的，甩掉铃声 / 提示音 / 录音。
+      // 兜底：万一全被滤掉（个别机型 is_music 全为 0），就退回全量，绝不显示空白。
+      final List<_Song> music =
+          all.where((_Song s) => s.isMusic).toList();
+      final List<_Song> kept = music.isEmpty ? all : music;
+
+      kept.sort((_Song a, _Song b) =>
+          a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+
       if (!mounted) return;
       setState(() {
-        _songs = list;
-        _stage = list.isEmpty ? 'empty' : 'ready';
+        _songs = kept;
+        _filteredOut = all.length - kept.length;
+        _stage = kept.isEmpty ? 'empty' : 'ready';
       });
     } catch (e) {
       if (!mounted) return;
@@ -153,6 +181,46 @@ class _LibraryPageState extends State<LibraryPage> {
         _stage = 'failed';
       });
     }
+  }
+
+  /// 插件对象 -> 纯字符串。所有字段访问都包 try，任何意外都退化成兜底值。
+  _Song _toSong(SongModel m) {
+    String title = '';
+    try {
+      title = _txt(m.title).trim();
+    } catch (e) {
+      title = '';
+    }
+    if (title.isEmpty) {
+      try {
+        title = _txt(m.displayNameWOExt).trim();
+      } catch (e) {
+        title = '';
+      }
+    }
+
+    String artist = '';
+    try {
+      artist = _txt(m.artist).trim();
+    } catch (e) {
+      artist = '';
+    }
+
+    String dur = '--:--';
+    try {
+      dur = _mmss(m.duration);
+    } catch (e) {
+      dur = '--:--';
+    }
+
+    bool isMusic = true; // 取不到就当它是音乐，宁可多显示也不漏
+    try {
+      isMusic = m.isMusic == true;
+    } catch (e) {
+      isMusic = true;
+    }
+
+    return _Song(title.isEmpty ? '未知曲目' : title, artist, dur, isMusic);
   }
 
   @override
@@ -191,7 +259,7 @@ class _LibraryPageState extends State<LibraryPage> {
                 style: const TextStyle(
                   fontSize: 12.5,
                   color: kBrass,
-                  letterSpacing: 1.4,
+                  letterSpacing: 1.2,
                 ),
               ),
               const SizedBox(height: 14),
@@ -205,9 +273,11 @@ class _LibraryPageState extends State<LibraryPage> {
 
   String _subtitle() {
     if (_stage == 'ready') {
-      return '共 ${_songs.length} 首';
+      final String extra =
+          _filteredOut > 0 ? ' · 已滤掉 $_filteredOut 首铃声/提示音' : '';
+      return '共 ${_songs.length} 首$extra';
     }
-    return '手机版 · N2 曲库';
+    return '手机版 · 曲库 $kBuild';
   }
 
   Widget _body() {
@@ -329,8 +399,7 @@ class _LibraryPageState extends State<LibraryPage> {
         color: kLine,
       ),
       itemBuilder: (BuildContext c, int i) {
-        final AudioModel m = _songs[i];
-        final String artist = _txt(m.artist);
+        final _Song m = _songs[i];
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 11),
           child: Row(
@@ -341,14 +410,14 @@ class _LibraryPageState extends State<LibraryPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     Text(
-                      _txt(m.title),
+                      m.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 14.5, color: kText),
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      artist.isEmpty ? '未知歌手' : artist,
+                      m.artist.isEmpty ? '未知歌手' : m.artist,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 12, color: kMuted),
@@ -358,7 +427,7 @@ class _LibraryPageState extends State<LibraryPage> {
               ),
               const SizedBox(width: 12),
               Text(
-                _mmss(m.duration),
+                m.dur,
                 style: const TextStyle(fontSize: 12, color: kBrassLight),
               ),
             ],
