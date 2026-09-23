@@ -8,13 +8,15 @@
 #   N5：零新依赖（改用 just_audio 的新播放列表 API 装整库队列
 #       → 通知栏上下曲 + 播完循环整库）
 #   N6：+ shared_preferences（手机版第一个「往手机写数据」的节点）
-#       评分 5 星 + 按星级排序；并把电脑版已打的 31 首星一次性导入
-#   N7 起：搜索 / 视觉打磨。
+#       评分 5 星 + 按星级排序
+#   N7：零新依赖（搜索：纯 Dart 内存过滤 + 一个输入框）
+#       ＋同轮清理：删掉 N6 的「导入电脑版星星」种子（非产品功能）
+#   N8 起：视觉打磨。
 
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.6.0+7
+version: 0.7.0+8
 
 environment:
   # 不写上界，兼容未来更高版本的 Dart
@@ -68,10 +70,8 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # N6：电脑版已打评分的**一次性种子**。
-  #     首次启动时若本地还没有任何评分，就把它导进来 —— 于是电脑上打过的星不用重打。
-  #     · 键 = 文件名（含扩展名），与电脑版 ratings.json **完全同构**
-  #     · 数据来源：D:\WorkBuddy\音乐\ratings.json（2026-09-23 快照，31 条）
-  #     ⚠️ 这只是种子，不是持续同步：导入之后手机上新增的评分只存在手机里。
-  assets:
-    - assets/ratings_import.json
+  # N7：**没有 assets 了。**
+  #     N6 曾在这里声明 assets/ratings_import.json（电脑版评分的种子），
+  #     2026-09-23 经十一判定**该功能不该存在**（目标用户电脑上没有数据，
+  #     且预置开发者私人数据方向就是错的）→ 连同文件与代码一并删除。
+  #     详见 节点进度.md §二十二 / §二十三。
