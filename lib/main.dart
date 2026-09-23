@@ -48,7 +48,7 @@
 //        · itemBuilder：`_songs[i]` → `vis[i]`
 //        · 高亮判断：**不能比下标**，改成比对象（fileName + uri）
 //        · onTap：先把可见项映射回 `_songs` 的**真实下标**，再调 `_play`
-//      另：`_visList()` 刻意**不缓存为 state**，每次从 (`_songs` 顺序 + `_query`)
+//      另：`_visList()` 刻意**不缓存为 state**，每次从 (`_songs` 顺序 + `_searchText`)
 //      纯函数算出 —— 否则切排序后会出现「列表变了、缓存没更新」的失同步。
 //
 //  标记串：SHIYI_PLAYER_N7 —— CI 会检查它，防止本文件被模板覆盖。
@@ -186,7 +186,7 @@ class _LibraryPageState extends State<LibraryPage> {
   // ===== N7：搜索 =====
   // 只作为「视图过滤条件」存在 —— 绝不改写 _songs，绝不重建播放队列。
   // 🔴 现有列表代码全程按下标工作，过滤后必须做下标映射（见 _realIndex / _isPlaying）。
-  String _query = '';
+  String _searchText = '';
   final TextEditingController _searchCtl = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
 
@@ -470,11 +470,11 @@ class _LibraryPageState extends State<LibraryPage> {
 
   /// 可见列表 = 在「**已排序**的 `_songs`」之上做关键词过滤。
   ///
-  /// 🔴 刻意**不缓存为 state** —— 每次从 (`_songs` 当前顺序 + `_query`) 纯函数算出。
+  /// 🔴 刻意**不缓存为 state** —— 每次从 (`_songs` 当前顺序 + `_searchText`) 纯函数算出。
   ///    这样「切排序后搜索结果自动跟着变」，永远不会出现「列表变了但缓存没更新」的
   ///    失同步。110 首的过滤是 O(n)，每帧算一次也远小于一帧预算。
   List<_Song> _visList() {
-    final String q = _query.trim().toLowerCase();
+    final String q = _searchText.trim().toLowerCase();
     if (q.isEmpty) return _songs;
     // 空格分隔 = 多个关键词，**全部命中**才算（例如「花 鸦」也能搜到「花鸦 - 雾屿霓虹」）
     final List<String> keys = q
@@ -762,7 +762,7 @@ class _LibraryPageState extends State<LibraryPage> {
       //     搜索时必须能看到命中几首，否则「列表怎么空了」和「搜不到」
       //     在界面上长得一模一样，用户无法区分。
       final String hit =
-          _query.trim().isEmpty ? '' : ' · 找到 ${_visList().length} 首';
+          _searchText.trim().isEmpty ? '' : ' · 找到 ${_visList().length} 首';
       return '共 ${_songs.length} 首$hit$star$dup$extra';
     }
     return '手机版 · 曲库 $kBuild';
@@ -783,8 +783,8 @@ class _LibraryPageState extends State<LibraryPage> {
     }
     // N7：搜索无命中 → 明确说「没找到」，绝不给一片空白。
     //（空白会让用户分不清「搜不到」和「App 坏了」）
-    if (_query.trim().isNotEmpty && _visList().isEmpty) {
-      return _hint('没找到「${_query.trim()}」\n\n可以搜歌名、歌手或文件名');
+    if (_searchText.trim().isNotEmpty && _visList().isEmpty) {
+      return _hint('没找到「${_searchText.trim()}」\n\n可以搜歌名、歌手或文件名');
     }
     return _songList();
   }
@@ -818,19 +818,19 @@ class _LibraryPageState extends State<LibraryPage> {
               ),
               onChanged: (String v) {
                 setState(() {
-                  _query = v;
+                  _searchText = v;
                 });
               },
             ),
           ),
           // ✕ 只在有输入时出现，平时不占视觉噪音
-          if (_query.isNotEmpty)
+          if (_searchText.isNotEmpty)
             GestureDetector(
               behavior: HitTestBehavior.opaque, // 扩大点击区，别被父级抢走
               onTap: () {
                 _searchCtl.clear();
                 setState(() {
-                  _query = '';
+                  _searchText = '';
                 });
               },
               child: const Padding(
