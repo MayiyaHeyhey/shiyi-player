@@ -5,12 +5,14 @@
 #   N2：+ on_audio_query（读系统媒体库：曲名/歌手/时长）
 #   N3：+ just_audio（前台播放：点歌出声 / 暂停 / 拖进度 / 上下曲）
 #   N4：+ just_audio_background（后台播放 + 通知栏/锁屏控制）
-#   N5 起：通知栏上下曲 / 视觉打磨 / 搜索。
+#   N5：零新依赖（改用 just_audio 的新播放列表 API 装整库队列
+#       → 通知栏上下曲 + 播完循环整库）
+#   N6 起：评分与星星排序 / 搜索 / 视觉打磨。
 
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.4.0+5
+version: 0.5.0+6
 
 environment:
   # 不写上界，兼容未来更高版本的 Dart
