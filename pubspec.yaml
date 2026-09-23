@@ -16,7 +16,7 @@
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.7.0+8
+version: 0.8.0+9
 
 environment:
   # 不写上界，兼容未来更高版本的 Dart
@@ -69,6 +69,19 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # N8：「深色潮玩」主题的数字展示体。
+  #     Space Grotesk Bold —— 已用 fonttools varLib.instancer 把可变字体
+  #     **钉死在 wght=700**（136KB → 88KB）。钉死的原因：
+  #     Flutter 对可变字重的支持在旧安卓（API 24/25）上会静默回退到默认字重，
+  #     而方案二的视觉身份就压在这批粗数字上，不容「有的手机粗有的手机细」。
+  #     ⚠️ 中文不走这个字体 —— 中文字体文件是 MB 级，体积不可接受；
+  #        中文继续用系统字，个性由 Latin 数字 + 形状语言承担。
+  fonts:
+    - family: SpaceGrotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-Bold.ttf
+          weight: 700
 
   # N7：**没有 assets 了。**
   #     N6 曾在这里声明 assets/ratings_import.json（电脑版评分的种子），
