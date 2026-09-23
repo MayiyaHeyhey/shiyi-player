@@ -1,9 +1,10 @@
 // ============================================================================
 //  十一 · 接着奏乐 —— 手机版
-//  N4 节点：前台能出声 → 后台也能响（后台播放 + 通知栏控制）
+//  N5 节点：单曲播放 → 整库装成播放队列
 //
-//  本节点只解决「切出去 / 锁屏 / 退出 App 后音乐不停 + 通知栏能控制」，
-//  视觉打磨与通知栏上下曲留给后面的节点。
+//  本节点只解决「播放结构」：把「一次只喂播放器一首歌」改成「一次喂整库队列」，
+//  于是通知栏的上一首/下一首按钮活了过来，且播完最后一首自动回到第一首（循环整库）。
+//  评分 / 排序 / 搜索 / 视觉打磨留给后面的节点。
 //
 //  ⚠️ 已经踩过的坑，改动时不要回退（完整记录见 节点进度.md）：
 //   1) 模型类名是 SongModel，不是 AudioModel（后者是插件内部基类，2.9.0 未导出）。
@@ -13,14 +14,21 @@
 //   3) 插件的 querySongs() 不带 IS_MUSIC 过滤，铃声/提示音会一起捞出来 ——
 //      本文件在 Dart 侧按 isMusic 过滤，并带兜底（滤完为空则退回全量，绝不给空白页）。
 //   4) 分区存储下 MediaStore 的 _data 文件路径不保证可读 ——
-//      播放走「content:// URI 优先，文件路径降级」两级链，见 _play()。
-//   5) 【N4 新增】后台播放由 just_audio_background 接管，代价是三处配套改动，
+//      建队列时逐首选源：content:// URI 优先，拿不到才退文件路径，见 _buildSources()。
+//   5) 后台播放由 just_audio_background 接管，代价是三处配套改动，
 //      缺任何一处都会「能装能开但通知栏不出现」：
 //        · 本文件：main() 里 await JustAudioBackground.init() + 每个音源挂 MediaItem
 //        · CI：manifest 注入 AudioService / MediaButtonReceiver 与 3 条权限
 //        · CI：把 MainActivity 的父类换成 AudioServiceActivity（见 build-apk.yml 第 7 步）
+//   6) 【N5 新增】两处「一改就出连锁 bug」的地方：
+//        · 队列装上后播放器自己会切歌 —— 必须删掉 N3/N4 那个
+//          「processingState==completed 就手动下一首」的监听，否则会连跳两首。
+//        · 播放器构造必须显式给 maxSkipsOnError：它的默认值是 0，
+//          意思是「一个坏文件就卡住」，整库队列里这很致命。
+//      另：0.10.x 的新播放列表 API 是 setAudioSources(List<AudioSource>)；
+//          ConcatenatingAudioSource 已在 0.10.0 废弃，不要走老路。
 //
-//  标记串：SHIYI_PLAYER_N4 —— CI 会检查它，防止本文件被模板覆盖。
+//  标记串：SHIYI_PLAYER_N5 —— CI 会检查它，防止本文件被模板覆盖。
 // ============================================================================
 import 'dart:async';
 
@@ -30,7 +38,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.4.0 · N4';
+const String kBuild = 'v0.5.0 · N5';
 
 // ===== 设计令牌：与网页版 index.html 一致（墨黑 + 黄铜）=====
 const Color kInk = Color(0xFF0B0A09); // 暖黑底
@@ -122,9 +130,16 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> {
   final OnAudioQuery _query = OnAudioQuery();
 
-  // N3：前台播放器。一个实例够用（just_audio_background 也只支持单实例）。
-  final AudioPlayer _player = AudioPlayer();
-  StreamSubscription<ProcessingState>? _psSub;
+  // 播放器：一个实例够用（just_audio_background 也只支持单实例）。
+  // N5：maxSkipsOnError 的默认值是 0 —— 队列里只要有一个坏文件就会卡在那儿。
+  //     显式给个上限，坏文件自动跳过，不拖垮整条队列。
+  final AudioPlayer _player = AudioPlayer(maxSkipsOnError: 5);
+  // N5：界面下标跟着播放器的 currentIndex 走，自动切歌时界面才跟得上
+  StreamSubscription<int?>? _ciSub;
+
+  // N5：整库队列。装成功后缓存下来，之后切歌只 seek 不重建
+  //（115 首要是一首歌就重建一次队列，纯属浪费）。
+  List<AudioSource>? _sources;
 
   // checking | denied | loading | ready | empty | failed
   String _stage = 'checking';
@@ -138,18 +153,22 @@ class _LibraryPageState extends State<LibraryPage> {
   @override
   void initState() {
     super.initState();
-    // 播完自动下一首
-    _psSub = _player.processingStateStream.listen((ProcessingState st) {
-      if (st == ProcessingState.completed && mounted) {
-        _next();
-      }
+    // N5：自动切歌交给播放器自己（队列 + LoopMode.all），这里只负责让界面跟上。
+    // ⚠️ 千万别在这里再监听 processingState==completed 去手动切下一首 ——
+    //    会和播放器自己的切歌叠加，表现成「一首歌没放完就跳两首」。
+    _ciSub = _player.currentIndexStream.listen((int? idx) {
+      if (!mounted || idx == null || idx == _index) return;
+      setState(() {
+        _index = idx;
+        _dragMs = null;
+      });
     });
     _boot();
   }
 
   @override
   void dispose() {
-    _psSub?.cancel();
+    _ciSub?.cancel();
     _player.dispose();
     super.dispose();
   }
@@ -205,6 +224,9 @@ class _LibraryPageState extends State<LibraryPage> {
     }
     _index = -1;
     _dragMs = null;
+    // N5：曲库要重扫了，队列必须作废重建 ——
+    // 否则「界面上的第 3 首」和「队列里的第 3 首」会错位（还播着旧列表里的歌）。
+    _sources = null;
 
     try {
       // 不传查询参数，用插件默认行为（外部存储 / 按标题升序），减少 API 签名差异风险。
@@ -214,7 +236,12 @@ class _LibraryPageState extends State<LibraryPage> {
       // 只留媒体库标记为「音乐」的，甩掉铃声 / 提示音 / 录音。
       // 兜底：万一全被滤掉（个别机型 is_music 全为 0），就退回全量，绝不显示空白。
       final List<_Song> music = all.where((_Song s) => s.isMusic).toList();
-      final List<_Song> kept = music.isEmpty ? all : music;
+      final List<_Song> music2 = music.isEmpty ? all : music;
+      // N5：队列要求「列表下标 == 队列下标」严格一一对应，
+      // 所以拿不到任何可播地址的僵尸条目必须先剔掉（否则整库下标后移、全错位）。
+      final List<_Song> kept = music2
+          .where((_Song s) => s.uri.isNotEmpty || s.data.isNotEmpty)
+          .toList();
 
       kept.sort((_Song a, _Song b) =>
           a.title.toLowerCase().compareTo(b.title.toLowerCase()));
@@ -291,51 +318,57 @@ class _LibraryPageState extends State<LibraryPage> {
 
   // ===== 播放 =====
 
-  Future<void> _play(int i) async {
-    if (i < 0 || i >= _songs.length) return;
-    final _Song s = _songs[i];
-    setState(() {
-      _index = i;
-      _dragMs = null;
-    });
-
-    // N4：通知栏/锁屏要显示曲名歌手，必须给音源挂 MediaItem。
-    // id 用 uri（或退化成文件路径）—— 同一首歌必须稳定得到同一个 id，
-    // 否则系统会把「同一首歌」当成两首，出现重复的通知或封面缓存错乱。
+  /// 一首歌 -> 通知栏用的 MediaItem。
+  /// 同一首歌必须稳定得到同一个 id，否则系统会把它当成两首，
+  /// 表现为重复通知 / 封面缓存错乱。
+  MediaItem _tagOf(_Song s, int i) {
     final String mediaId = s.uri.isNotEmpty ? s.uri : s.data;
-    final MediaItem tag = MediaItem(
+    return MediaItem(
       id: mediaId.isEmpty ? 'idx-$i' : mediaId,
       title: s.title,
       artist: s.artist.isEmpty ? '未知歌手' : s.artist,
       duration: s.durMs > 0 ? Duration(milliseconds: s.durMs) : null,
     );
+  }
 
-    bool ok = false;
-
-    // ① 首选 content:// URI —— 分区存储下最稳，且不需要文件路径权限
-    if (s.uri.isNotEmpty) {
-      try {
-        await _player.setAudioSource(
-            AudioSource.uri(Uri.parse(s.uri), tag: tag));
-        ok = true;
-      } catch (e) {
-        ok = false;
-      }
+  /// N5：把整个曲库建成一条播放队列。
+  /// 顺序必须和 _songs 完全一致 —— 界面下标要直接当队列下标用。
+  /// 逐首选源：content:// URI 优先（分区存储下最稳），拿不到才退文件路径。
+  List<AudioSource> _buildSources() {
+    final List<AudioSource> out = <AudioSource>[];
+    for (int i = 0; i < _songs.length; i++) {
+      final _Song s = _songs[i];
+      final MediaItem tag = _tagOf(s, i);
+      out.add(s.uri.isNotEmpty
+          ? AudioSource.uri(Uri.parse(s.uri), tag: tag)
+          : AudioSource.file(s.data, tag: tag));
     }
+    return out;
+  }
 
-    // ② 降级：真实文件路径（媒体文件在 READ_MEDIA_AUDIO 授权下可直读）
-    //    注意这里用 AudioSource.file 而不是 setFilePath —— 后者没有 tag 参数，
-    //    走它就会丢掉 MediaItem，通知栏会变成没有标题的空壳。
-    if (!ok && s.data.isNotEmpty) {
-      try {
-        await _player.setAudioSource(AudioSource.file(s.data, tag: tag));
-        ok = true;
-      } catch (e) {
-        ok = false;
+  Future<void> _play(int i) async {
+    if (i < 0 || i >= _songs.length) return;
+    final _Song s = _songs[i];
+    if (!mounted) return;
+    setState(() {
+      _index = i;
+      _dragMs = null;
+    });
+
+    try {
+      final List<AudioSource>? q = _sources;
+      if (q == null) {
+        // 首次播放 / 重新扫描后：装整库队列，从点的这首开始
+        final List<AudioSource> built = _buildSources();
+        await _player.setAudioSources(built, initialIndex: i);
+        // 循环整库：最后一首放完自动回第一首，不断播
+        await _player.setLoopMode(LoopMode.all);
+        _sources = built;
+      } else {
+        // 队列已在，直接切轨道 —— 不重建队列（115 首重建一次太浪费）
+        await _player.seek(Duration.zero, index: i);
       }
-    }
-
-    if (!ok) {
+    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('这首播不了：${s.title}')),
