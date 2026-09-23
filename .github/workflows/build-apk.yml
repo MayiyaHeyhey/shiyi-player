@@ -13,6 +13,7 @@
 #    N2：注入 READ_MEDIA_AUDIO（安卓 13+ 读音乐必需）+ 老插件 AGP8 兼容兜底
 #    N3：摘掉 media3 带进来的 INTERNET 权限（只读本地，不联网）
 #    N4：后台播放三件套（3 条权限 / AudioService+MediaButtonReceiver / Activity 换父类）
+#    N5：工作流一行都不用改（整库队列是纯 Dart 的事，靠 just_audio 的 setAudioSources）
 # ============================================================================
 
 name: 构建 APK
