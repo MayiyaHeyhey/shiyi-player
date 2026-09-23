@@ -1,10 +1,10 @@
 // ============================================================================
 //  十一 · 接着奏乐 —— 手机版
-//  N5 节点：单曲播放 → 整库装成播放队列
+//  N6 节点：评分（5 星）+ 按星级排序
 //
-//  本节点只解决「播放结构」：把「一次只喂播放器一首歌」改成「一次喂整库队列」，
-//  于是通知栏的上一首/下一首按钮活了过来，且播完最后一首自动回到第一首（循环整库）。
-//  评分 / 排序 / 搜索 / 视觉打磨留给后面的节点。
+//  本节点是手机版**第一个「往手机写数据」**的节点：把「文件名 -> 星数」存进手机。
+//  并一次性导入电脑版已打的 31 首星 —— 键用文件名，与电脑版 ratings.json 同构。
+//  搜索与视觉打磨留给后面的节点。
 //
 //  ⚠️ 已经踩过的坑，改动时不要回退（完整记录见 节点进度.md）：
 //   1) 模型类名是 SongModel，不是 AudioModel（后者是插件内部基类，2.9.0 未导出）。
@@ -27,18 +27,31 @@
 //          意思是「一个坏文件就卡住」，整库队列里这很致命。
 //      另：0.10.x 的新播放列表 API 是 setAudioSources(List<AudioSource>)；
 //          ConcatenatingAudioSource 已在 0.10.0 废弃，不要走老路。
+//   7) 【N6 新增】评分有两个「看着能用、其实会串」的陷阱：
+//        · 键必须是**文件名（含扩展名）**，不是曲名、更不是自增序号 ——
+//          曲名会被「取不到标签」的兜底值污染，序号会随排序变化而漂移。
+//          用文件名还顺带让电脑版已打的星可以直接搬过来。
+//        · 改排序会改变列表顺序，而 N5 的**队列顺序 = 列表顺序** →
+//          排序一变就必须**作废并重建队列**，否则界面高亮会指到别的歌、
+//          甚至播的还是旧顺序里那一首。
+//   8) 【N6 新增】持久化用 `SharedPreferencesAsync`，**不要**用经典的
+//      `SharedPreferences`（官方已标为 legacy 并建议新用户改用 Async 版）；
+//      也**不要**直接 import sqflite —— 它只是别人的传递依赖，属隐式依赖。
 //
-//  标记串：SHIYI_PLAYER_N5 —— CI 会检查它，防止本文件被模板覆盖。
+//  标记串：SHIYI_PLAYER_N6 —— CI 会检查它，防止本文件被模板覆盖。
 // ============================================================================
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:on_audio_query/on_audio_query.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.5.0 · N5';
+const String kBuild = 'v0.6.0 · N6';
 
 // ===== 设计令牌：与网页版 index.html 一致（墨黑 + 黄铜）=====
 const Color kInk = Color(0xFF0B0A09); // 暖黑底
@@ -48,6 +61,7 @@ const Color kBrass = Color(0xFFD8A24A); // 主色·黄铜
 const Color kBrassLight = Color(0xFFF0C47C); // 亮黄铜
 const Color kText = Color(0xFFECE5D9); // 暖白字
 const Color kMuted = Color(0xFF8A8175); // 次级文字
+const Color kStarOff = Color(0xFF423A30); // N6：未点亮的星（刻意压暗，免得整屏发花）
 
 // ---- 安全取值工具 ----
 // 插件字段的可空性在不同版本间会变（String / String? / bool?），
@@ -74,7 +88,7 @@ String _mmss(dynamic raw) {
 /// 这样界面层永远不会因为插件字段为 null 而崩。
 class _Song {
   _Song(this.title, this.artist, this.dur, this.durMs, this.isMusic, this.uri,
-      this.data);
+      this.data, this.fileName);
   final String title;
   final String artist;
   final String dur; // 已格式化好的 m:ss（列表右侧显示用）
@@ -82,6 +96,10 @@ class _Song {
   final bool isMusic;
   final String uri; // content://media/external/audio/media/<id>
   final String data; // 真实文件路径（降级用）
+  // N6：评分键 —— 文件名（含扩展名）。
+  // 选它的三个理由：① 与电脑版 ratings.json 同构，评分可直接搬过来
+  // ② 不受「曲名取不到标签」的兜底值影响 ③ 不随排序变化而漂移
+  final String fileName;
 }
 
 Future<void> main() async {
@@ -141,6 +159,17 @@ class _LibraryPageState extends State<LibraryPage> {
   //（115 首要是一首歌就重建一次队列，纯属浪费）。
   List<AudioSource>? _sources;
 
+  // ===== N6：评分 =====
+  // 键 = 文件名（含扩展名），与电脑版 ratings.json 同构 → 电脑上打的星能直接搬过来。
+  Map<String, int> _stars = <String, int>{};
+  static const String _kStarsKey = 'shiyi_mobile_ratings_v1';
+  static const String _kSeedAsset = 'assets/ratings_import.json';
+  int _ratedCount = 0; // 曲库里已评分的首数（副标题显示用）
+  int _sameNameGroups = 0; // 诊断：曲库里有几组同名文件（同名会共享同一份评分）
+
+  // 排序模式：'title' 按标题升序（默认） | 'stars' 按星级降序
+  String _sortMode = 'title';
+
   // checking | denied | loading | ready | empty | failed
   String _stage = 'checking';
   List<_Song> _songs = <_Song>[];
@@ -191,6 +220,8 @@ class _LibraryPageState extends State<LibraryPage> {
       });
       return;
     }
+    // N6：先把评分读出来，_load() 里统计「已评 N 首」才是准的
+    await _loadStars();
     await _load();
   }
 
@@ -243,14 +274,32 @@ class _LibraryPageState extends State<LibraryPage> {
           .where((_Song s) => s.uri.isNotEmpty || s.data.isNotEmpty)
           .toList();
 
-      kept.sort((_Song a, _Song b) =>
-          a.title.toLowerCase().compareTo(b.title.toLowerCase()));
-
       if (!mounted) return;
       setState(() {
         _songs = kept;
+        _sortSongs(); // N6：按当前排序模式排列（默认按标题）
         _filteredOut = all.length - kept.length;
         _stage = kept.isEmpty ? 'empty' : 'ready';
+
+        // N6：统计「曲库里已评了几首」
+        _ratedCount = 0;
+        for (final _Song s in _songs) {
+          if ((_stars[s.fileName] ?? 0) > 0) _ratedCount++;
+        }
+
+        // N6 诊断：同名文件会**共享同一份评分**（键是文件名）。
+        // 这里不预先假设「手机上没有重名」—— 把它显示出来，让事实自己说话。
+        final Map<String, int> cnt = <String, int>{};
+        for (final _Song s in _songs) {
+          if (s.fileName.isNotEmpty) {
+            cnt[s.fileName] = (cnt[s.fileName] ?? 0) + 1;
+          }
+        }
+        int dup = 0;
+        cnt.forEach((String k, int v) {
+          if (v > 1) dup++;
+        });
+        _sameNameGroups = dup;
       });
     } catch (e) {
       if (!mounted) return;
@@ -312,8 +361,156 @@ class _LibraryPageState extends State<LibraryPage> {
       data = '';
     }
 
+    // N6：评分键。displayName 就是「文件名含扩展名」
+    //（displayNameWOExt 是去掉扩展名的版本，别拿它当键 —— 会和电脑版的键对不上）。
+    String fileName = '';
+    try {
+      fileName = _txt(m.displayName).trim();
+    } catch (e) {
+      fileName = '';
+    }
+    if (fileName.isEmpty && data.isNotEmpty) {
+      fileName = data.split('/').last; // 兜底：从真实路径取末段
+    }
+
     return _Song(title.isEmpty ? '未知曲目' : title, artist, _mmss(durMs), durMs,
-        isMusic, uri, data);
+        isMusic, uri, data, fileName);
+  }
+
+  // ===== N6：评分 =====
+
+  /// 载入评分。**首次启动（本地还没存过）时，导入 assets 里电脑版的种子。**
+  Future<void> _loadStars() async {
+    String? raw;
+    try {
+      final SharedPreferencesAsync prefs = SharedPreferencesAsync();
+      raw = await prefs.getString(_kStarsKey);
+      if (raw == null) {
+        // 第一次跑：把电脑版已打的星导进来（一次性种子，之后以手机本地为准）
+        try {
+          raw = await rootBundle.loadString(_kSeedAsset);
+        } catch (e) {
+          raw = null;
+        }
+        if (raw != null) {
+          await prefs.setString(_kStarsKey, raw);
+        }
+      }
+    } catch (e) {
+      raw = null; // 读不出来就当「还没评分」，绝不因此让 App 起不来
+    }
+
+    final Map<String, int> m = <String, int>{};
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final Object? j = jsonDecode(raw);
+        if (j is Map) {
+          j.forEach((Object? k, Object? v) {
+            final int n = _intOf(v);
+            if (k != null && n >= 1 && n <= 5) {
+              m['$k'] = n;
+            }
+          });
+        }
+      } catch (e) {
+        // 数据坏了就当作空，不崩
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _stars = m;
+    });
+  }
+
+  /// 落盘。写失败不致命（内存里的评分照常生效），所以静默处理。
+  Future<void> _saveStars() async {
+    try {
+      await SharedPreferencesAsync().setString(_kStarsKey, jsonEncode(_stars));
+    } catch (e) {
+      // 忽略：这次没存住而已
+    }
+  }
+
+  /// 点第 n 颗星。**再点同一颗 = 取消评分**（给错了得能退）。
+  void _rate(_Song s, int n) {
+    if (s.fileName.isEmpty) return; // 拿不到文件名就没法存，直接忽略
+    setState(() {
+      if ((_stars[s.fileName] ?? 0) == n) {
+        _stars.remove(s.fileName);
+      } else {
+        _stars[s.fileName] = n;
+      }
+      _ratedCount = 0;
+      for (final _Song x in _songs) {
+        if ((_stars[x.fileName] ?? 0) > 0) _ratedCount++;
+      }
+    });
+    _saveStars();
+  }
+
+  /// 按当前模式**原地**重排 _songs。
+  /// 星级排序的**次级键是标题** —— 同星级内部顺序稳定，不会每次刷新都乱跳。
+  void _sortSongs() {
+    _songs.sort((_Song a, _Song b) {
+      if (_sortMode == 'stars') {
+        final int sa = _stars[a.fileName] ?? 0;
+        final int sb = _stars[b.fileName] ?? 0;
+        if (sa != sb) return sb.compareTo(sa); // 星级降序
+      }
+      return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+    });
+  }
+
+  /// 切换排序。
+  /// 🔴 关键：列表顺序一变，N5 那条「**队列顺序 = 列表顺序**」的对应关系就断了，
+  /// 所以必须**作废并重建队列**；正在播放时还得把「同一首歌的同一秒」接回去 ——
+  /// 否则界面高亮会指到别的歌，甚至播的还是旧顺序里的那一首。
+  Future<void> _setSort(String mode) async {
+    if (_sortMode == mode) return;
+
+    final _Song? playing =
+        (_index >= 0 && _index < _songs.length) ? _songs[_index] : null;
+    final Duration pos = _player.position;
+    final bool wasPlaying = _player.playing;
+
+    setState(() {
+      _sortMode = mode;
+      _sortSongs();
+      _dragMs = null;
+    });
+
+    if (playing == null) {
+      _sources = null; // 没在播：只作废队列，下次点歌自然会重建
+      return;
+    }
+
+    // 按「文件名 + uri」认人找新下标 —— 不能按下标找，下标已经变了
+    final int ni = _songs.indexWhere((_Song s) =>
+        s.fileName == playing.fileName && s.uri == playing.uri);
+    if (ni < 0) {
+      _sources = null;
+      return;
+    }
+    setState(() {
+      _index = ni;
+    });
+
+    try {
+      final List<AudioSource> built = _buildSources();
+      await _player.setAudioSources(built,
+          initialIndex: ni, initialPosition: pos);
+      await _player.setLoopMode(LoopMode.all);
+      _sources = built;
+      if (wasPlaying) {
+        try {
+          await _player.play();
+        } catch (e) {
+          // 续播失败不致命
+        }
+      }
+    } catch (e) {
+      _sources = null; // 重建失败：作废掉，下次点歌重建，不打扰用户
+    }
   }
 
   // ===== 播放 =====
@@ -428,15 +625,41 @@ class _LibraryPageState extends State<LibraryPage> {
                   ),
                 ],
               ),
-              Text(
-                _subtitle(),
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  color: kBrass,
-                  letterSpacing: 1.2,
-                ),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      _subtitle(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: kBrass,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  // N6：排序切换。直接写当前模式，不用图标让人猜
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 30),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      foregroundColor: kBrassLight,
+                    ),
+                    onPressed: _stage == 'ready'
+                        ? () {
+                            _setSort(_sortMode == 'stars' ? 'title' : 'stars');
+                          }
+                        : null,
+                    child: Text(
+                      _sortMode == 'stars' ? '排序：按星级' : '排序：按标题',
+                      style: const TextStyle(fontSize: 12, letterSpacing: 0.5),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 10),
               Expanded(child: _body()),
               if (_index >= 0 && _index < _songs.length) _playerBar(),
             ],
@@ -448,9 +671,13 @@ class _LibraryPageState extends State<LibraryPage> {
 
   String _subtitle() {
     if (_stage == 'ready') {
+      // 顺序即优先级：「已评」和「同名警告」比「滤掉多少首」重要，所以放前面
+      final String star = _ratedCount > 0 ? ' · 已评 $_ratedCount 首' : '';
+      final String dup =
+          _sameNameGroups > 0 ? ' · ⚠️ $_sameNameGroups 组同名' : '';
       final String extra =
           _filteredOut > 0 ? ' · 已滤掉 $_filteredOut 首铃声/提示音' : '';
-      return '共 ${_songs.length} 首$extra';
+      return '共 ${_songs.length} 首$star$dup$extra';
     }
     return '手机版 · 曲库 $kBuild';
   }
@@ -564,6 +791,38 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
+  /// N6：5 颗可点的小星。
+  /// ⚠️ 星星自己得**吃掉点击事件**（HitTestBehavior.opaque），否则会穿透到整行的
+  ///    InkWell 上去，变成「想打星结果触发了播放」。嵌套手势里最内层优先，这是关键。
+  Widget _starsRow(_Song s) {
+    final int cur = _stars[s.fileName] ?? 0;
+    final bool canRate = s.fileName.isNotEmpty;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List<Widget>.generate(5, (int i) {
+        final int n = i + 1;
+        final bool on = n <= cur;
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: canRate
+              ? () {
+                  _rate(s, n);
+                }
+              : null,
+          child: Padding(
+            // 左右各 2px：把点击热区从 16px 撑到 20px，手指才点得准
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+            child: Icon(
+              on ? Icons.star_rounded : Icons.star_outline_rounded,
+              size: 16,
+              color: on ? kBrass : kStarOff,
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
   Widget _songList() {
     return ListView.separated(
       padding: const EdgeInsets.only(bottom: 12),
@@ -589,31 +848,48 @@ class _LibraryPageState extends State<LibraryPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text(
-                        m.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 14.5,
-                          color: playing ? kBrass : kText,
-                          fontWeight:
-                              playing ? FontWeight.w600 : FontWeight.w400,
-                        ),
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              m.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 14.5,
+                                color: playing ? kBrass : kText,
+                                fontWeight: playing
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            m.dur,
+                            style: const TextStyle(
+                                fontSize: 12, color: kBrassLight),
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        m.artist.isEmpty ? '未知歌手' : m.artist,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 12, color: kMuted),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              m.artist.isEmpty ? '未知歌手' : m.artist,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  const TextStyle(fontSize: 12, color: kMuted),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          _starsRow(m), // N6：5 颗可点的星
+                        ],
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  m.dur,
-                  style: const TextStyle(fontSize: 12, color: kBrassLight),
                 ),
               ],
             ),
