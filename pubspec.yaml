@@ -7,12 +7,14 @@
 #   N4：+ just_audio_background（后台播放 + 通知栏/锁屏控制）
 #   N5：零新依赖（改用 just_audio 的新播放列表 API 装整库队列
 #       → 通知栏上下曲 + 播完循环整库）
-#   N6 起：评分与星星排序 / 搜索 / 视觉打磨。
+#   N6：+ shared_preferences（手机版第一个「往手机写数据」的节点）
+#       评分 5 星 + 按星级排序；并把电脑版已打的 31 首星一次性导入
+#   N7 起：搜索 / 视觉打磨。
 
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.5.0+6
+version: 0.6.0+7
 
 environment:
   # 不写上界，兼容未来更高版本的 Dart
@@ -43,9 +45,33 @@ dependencies:
   #        传递出来的 sqflite_android 也已自带 namespace（无需 CI 补丁）。
   just_audio_background: ^0.0.1-beta.17
 
+  # N6：评分持久化。选它的理由：
+  #   · 评分本质是「文件名 -> 星数」的扁平映射，键值存储天然匹配
+  #   · flutter.dev 官方包，Android 24+ 起步（与本项目 minSdk 一致）
+  #   · 已核对 shared_preferences_android 的 build.gradle.kts：
+  #     namespace = io.flutter.plugins.sharedpreferences、
+  #     compileSdk = flutter.compileSdkVersion、JVM_17 → AGP8 就绪，无需 CI 补丁
+  #
+  #   ⚠️ 用 SharedPreferencesAsync，**不要**用经典的 SharedPreferences ——
+  #      官方已把后者标为 legacy（"will be deprecated"），并明确建议新用户改用 Async 版。
+  #      本项目是「启动读一次 + 点星写一次」，Async 完全够，且不带本地缓存那套坑。
+  #
+  #   ⚠️ **不要**图省事直接 import sqflite —— 它虽然在 N4 带来的依赖链里
+  #      （audio_service → flutter_cache_manager → sqflite），但那是**别人的传递依赖**：
+  #      直接 import 属于隐式依赖，版本会随 audio_service 变动而失控。
+  shared_preferences: ^2.5.5
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
 flutter:
   uses-material-design: true
+
+  # N6：电脑版已打评分的**一次性种子**。
+  #     首次启动时若本地还没有任何评分，就把它导进来 —— 于是电脑上打过的星不用重打。
+  #     · 键 = 文件名（含扩展名），与电脑版 ratings.json **完全同构**
+  #     · 数据来源：D:\WorkBuddy\音乐\ratings.json（2026-09-23 快照，31 条）
+  #     ⚠️ 这只是种子，不是持续同步：导入之后手机上新增的评分只存在手机里。
+  assets:
+    - assets/ratings_import.json
