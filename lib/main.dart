@@ -1,10 +1,13 @@
 // ============================================================================
 //  十一 · 接着奏乐 —— 手机版
-//  N6 节点：评分（5 星）+ 按星级排序
+//  N7 节点：搜索（零依赖）
 //
-//  本节点是手机版**第一个「往手机写数据」**的节点：把「文件名 -> 星数」存进手机。
-//  并一次性导入电脑版已打的 31 首星 —— 键用文件名，与电脑版 ratings.json 同构。
-//  搜索与视觉打磨留给后面的节点。
+//  搜索**只是「视图过滤」** —— 不改 _songs、不重建播放队列：
+//  点搜索结果播它自己，之后仍按全库循环（延续 N5 的「循环整库」）。
+//  同轮并入两笔旧账：① 删掉「导入电脑版星星」的种子功能
+//  （目标用户电脑上没有数据，产品不该预置开发者的私人数据）
+//  ② _subtitle() 的「已评 N 首」改为**恒常显示**（零值时隐藏会把失败伪装成「功能没做」）。
+//  视觉打磨留给 N8。
 //
 //  ⚠️ 已经踩过的坑，改动时不要回退（完整记录见 节点进度.md）：
 //   1) 模型类名是 SongModel，不是 AudioModel（后者是插件内部基类，2.9.0 未导出）。
@@ -37,21 +40,30 @@
 //   8) 【N6 新增】持久化用 `SharedPreferencesAsync`，**不要**用经典的
 //      `SharedPreferences`（官方已标为 legacy 并建议新用户改用 Async 版）；
 //      也**不要**直接 import sqflite —— 它只是别人的传递依赖，属隐式依赖。
+//   9) 【N7 新增】🔴 列表代码**全程按下标工作**（itemBuilder 的 `i` 同时当
+//      「列表下标」和「队列下标」用）。一加搜索过滤，「显示下标」就和
+//      `_songs` 下标错位了 —— 后果是**点搜索结果会播一首完全不相干的歌，
+//      而且不报错、不崩溃，只会静默播错**。
+//      三处必须同时处理，缺一即错（实现见 _visList / _isPlaying / _realIndex）：
+//        · itemBuilder：`_songs[i]` → `vis[i]`
+//        · 高亮判断：**不能比下标**，改成比对象（fileName + uri）
+//        · onTap：先把可见项映射回 `_songs` 的**真实下标**，再调 `_play`
+//      另：`_visList()` 刻意**不缓存为 state**，每次从 (`_songs` 顺序 + `_query`)
+//      纯函数算出 —— 否则切排序后会出现「列表变了、缓存没更新」的失同步。
 //
-//  标记串：SHIYI_PLAYER_N6 —— CI 会检查它，防止本文件被模板覆盖。
+//  标记串：SHIYI_PLAYER_N7 —— CI 会检查它，防止本文件被模板覆盖。
 // ============================================================================
 import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.6.0 · N6';
+const String kBuild = 'v0.7.0 · N7';
 
 // ===== 设计令牌：与网页版 index.html 一致（墨黑 + 黄铜）=====
 const Color kInk = Color(0xFF0B0A09); // 暖黑底
@@ -160,15 +172,23 @@ class _LibraryPageState extends State<LibraryPage> {
   List<AudioSource>? _sources;
 
   // ===== N6：评分 =====
-  // 键 = 文件名（含扩展名），与电脑版 ratings.json 同构 → 电脑上打的星能直接搬过来。
+  // 键 = 文件名（含扩展名）。选它的三个理由：① 不受「取不到标签」的兜底值影响
+  // ② 不随排序变化而漂移 ③ 字段全同的两首歌也能靠 uri 区分（见 _isPlaying）
+  //（N7 起不再「与电脑版 ratings.json 同构」—— 那条种子导入通道已删除）
   Map<String, int> _stars = <String, int>{};
   static const String _kStarsKey = 'shiyi_mobile_ratings_v1';
-  static const String _kSeedAsset = 'assets/ratings_import.json';
   int _ratedCount = 0; // 曲库里已评分的首数（副标题显示用）
   int _sameNameGroups = 0; // 诊断：曲库里有几组同名文件（同名会共享同一份评分）
 
   // 排序模式：'title' 按标题升序（默认） | 'stars' 按星级降序
   String _sortMode = 'title';
+
+  // ===== N7：搜索 =====
+  // 只作为「视图过滤条件」存在 —— 绝不改写 _songs，绝不重建播放队列。
+  // 🔴 现有列表代码全程按下标工作，过滤后必须做下标映射（见 _realIndex / _isPlaying）。
+  String _query = '';
+  final TextEditingController _searchCtl = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
 
   // checking | denied | loading | ready | empty | failed
   String _stage = 'checking';
@@ -198,6 +218,8 @@ class _LibraryPageState extends State<LibraryPage> {
   @override
   void dispose() {
     _ciSub?.cancel();
+    _searchCtl.dispose(); // N7
+    _searchFocus.dispose(); // N7
     _player.dispose();
     super.dispose();
   }
@@ -361,8 +383,9 @@ class _LibraryPageState extends State<LibraryPage> {
       data = '';
     }
 
-    // N6：评分键。displayName 就是「文件名含扩展名」
-    //（displayNameWOExt 是去掉扩展名的版本，别拿它当键 —— 会和电脑版的键对不上）。
+    // N6：评分键。`displayName` 就是「文件名含扩展名」。
+    // 别拿 `displayNameWOExt`（去掉扩展名的版本）当键 ——
+    // 它与用于**显示**的 title 是两回事，混用会让键不稳定。
     String fileName = '';
     try {
       fileName = _txt(m.displayName).trim();
@@ -379,23 +402,16 @@ class _LibraryPageState extends State<LibraryPage> {
 
   // ===== N6：评分 =====
 
-  /// 载入评分。**首次启动（本地还没存过）时，导入 assets 里电脑版的种子。**
+  /// 载入评分（只读手机本地）。
+  ///
+  /// N7：**删掉了「导入电脑版星星」的种子逻辑** —— 那**不是产品功能，是开发者便利**。
+  /// 目标用户电脑上没有数据；预置开发者的私人数据方向也是错的
+  /// （低概率会给「文件名恰好相同」的他人歌曲空降星级）。见 节点进度.md §二十二。
   Future<void> _loadStars() async {
     String? raw;
     try {
       final SharedPreferencesAsync prefs = SharedPreferencesAsync();
       raw = await prefs.getString(_kStarsKey);
-      if (raw == null) {
-        // 第一次跑：把电脑版已打的星导进来（一次性种子，之后以手机本地为准）
-        try {
-          raw = await rootBundle.loadString(_kSeedAsset);
-        } catch (e) {
-          raw = null;
-        }
-        if (raw != null) {
-          await prefs.setString(_kStarsKey, raw);
-        }
-      }
     } catch (e) {
       raw = null; // 读不出来就当「还没评分」，绝不因此让 App 起不来
     }
@@ -450,6 +466,52 @@ class _LibraryPageState extends State<LibraryPage> {
 
   /// 按当前模式**原地**重排 _songs。
   /// 星级排序的**次级键是标题** —— 同星级内部顺序稳定，不会每次刷新都乱跳。
+  // ===== N7：搜索 =====
+
+  /// 可见列表 = 在「**已排序**的 `_songs`」之上做关键词过滤。
+  ///
+  /// 🔴 刻意**不缓存为 state** —— 每次从 (`_songs` 当前顺序 + `_query`) 纯函数算出。
+  ///    这样「切排序后搜索结果自动跟着变」，永远不会出现「列表变了但缓存没更新」的
+  ///    失同步。110 首的过滤是 O(n)，每帧算一次也远小于一帧预算。
+  List<_Song> _visList() {
+    final String q = _query.trim().toLowerCase();
+    if (q.isEmpty) return _songs;
+    // 空格分隔 = 多个关键词，**全部命中**才算（例如「花 鸦」也能搜到「花鸦 - 雾屿霓虹」）
+    final List<String> keys = q
+        .split(RegExp(r'\s+'))
+        .where((String k) => k.isNotEmpty)
+        .toList();
+    if (keys.isEmpty) return _songs;
+    return _songs.where((_Song s) {
+      // 搜「曲名 + 歌手 + 文件名」。
+      // 文件名**必须在**：少数歌的 ID3 标签损坏、曲名显示成 `??`，
+      // 只有靠文件名才搜得到它们。
+      final String hay = '${s.title} ${s.artist} ${s.fileName}'.toLowerCase();
+      for (final String k in keys) {
+        if (!hay.contains(k)) return false;
+      }
+      return true;
+    }).toList();
+  }
+
+  /// 这一首是不是「正在播的那首」。
+  ///
+  /// 🔴 **不能比下标** —— 过滤之后「显示下标」和 `_songs` 下标已经对不上，
+  ///    比下标会把黄铜高亮打在一首根本没在放的歌上。
+  ///    改比「文件名 + uri」：uri 对应唯一一条 MediaStore 记录，
+  ///    与「当前是第几首」无关，因此过滤前后都成立。
+  bool _isPlaying(_Song s) {
+    if (_index < 0 || _index >= _songs.length) return false;
+    final _Song p = _songs[_index];
+    return s.fileName == p.fileName && s.uri == p.uri;
+  }
+
+  /// 过滤视图里的对象 → `_songs` 里的**真实下标**（找不到返回 -1）。
+  ///
+  /// `_Song` 没有重写 `operator ==`（已读码确认）⇒ `indexOf` 走**引用相等**；
+  /// 而 `_visList()` 返回的是同一批对象引用，故定位可靠、不会被「字段全同的两首歌」骗。
+  int _realIndex(_Song s) => _songs.indexOf(s);
+
   void _sortSongs() {
     _songs.sort((_Song a, _Song b) {
       if (_sortMode == 'stars') {
@@ -659,6 +721,12 @@ class _LibraryPageState extends State<LibraryPage> {
                   ),
                 ],
               ),
+              // N7：搜索框。**常驻单行**（比「点图标再展开」少一次点击）。
+              // 只在曲库就绪后出现 —— 没歌可搜时摆个搜索框是噪音。
+              if (_stage == 'ready') ...<Widget>[
+                const SizedBox(height: 8),
+                _searchField(),
+              ],
               const SizedBox(height: 10),
               Expanded(child: _body()),
               if (_index >= 0 && _index < _songs.length) _playerBar(),
@@ -672,12 +740,30 @@ class _LibraryPageState extends State<LibraryPage> {
   String _subtitle() {
     if (_stage == 'ready') {
       // 顺序即优先级：「已评」和「同名警告」比「滤掉多少首」重要，所以放前面
-      final String star = _ratedCount > 0 ? ' · 已评 $_ratedCount 首' : '';
+      //
+      // 🔴 N6 踩坑修正（详见 节点进度.md §二十二）：
+      //   旧写法是 `_ratedCount > 0 ? ' · 已评 N 首' : ''` —— **零值时整段消失**，
+      //   而「评分一条都没匹配上」恰恰就是零值那种情况，结果失败在界面上
+      //   看起来像「功能没做出来」，用户无法提供任何线索。
+      //   ⇒ 规则：关键计数恒常显示，绝不在零值时隐藏。
+      //
+      // 另附「找不到对应文件的评分条数」作为判别量：
+      //   正常情况下 _stars.length == _ratedCount（用户打几首就是几首）；
+      //   若 _stars.length > _ratedCount，多出来的就是「存着但曲库里没有的」——
+      //   种子导入后文件名对不上时，就是这个形态，一眼可分。
+      final int orphan = _stars.length - _ratedCount;
+      final String star = ' · 已评 $_ratedCount 首'
+          '${orphan > 0 ? '（另有 $orphan 条找不到对应文件）' : ''}';
       final String dup =
           _sameNameGroups > 0 ? ' · ⚠️ $_sameNameGroups 组同名' : '';
       final String extra =
           _filteredOut > 0 ? ' · 已滤掉 $_filteredOut 首铃声/提示音' : '';
-      return '共 ${_songs.length} 首$star$dup$extra';
+      // N7：搜索命中数。延续「关键计数恒常显示」纪律 ——
+      //     搜索时必须能看到命中几首，否则「列表怎么空了」和「搜不到」
+      //     在界面上长得一模一样，用户无法区分。
+      final String hit =
+          _query.trim().isEmpty ? '' : ' · 找到 ${_visList().length} 首';
+      return '共 ${_songs.length} 首$hit$star$dup$extra';
     }
     return '手机版 · 曲库 $kBuild';
   }
@@ -695,7 +781,66 @@ class _LibraryPageState extends State<LibraryPage> {
     if (_stage == 'empty') {
       return _emptyCard();
     }
+    // N7：搜索无命中 → 明确说「没找到」，绝不给一片空白。
+    //（空白会让用户分不清「搜不到」和「App 坏了」）
+    if (_query.trim().isNotEmpty && _visList().isEmpty) {
+      return _hint('没找到「${_query.trim()}」\n\n可以搜歌名、歌手或文件名');
+    }
     return _songList();
+  }
+
+  /// N7：搜索框。常驻单行 —— 放大镜 + 输入框 + 有输入才出现的 ✕。
+  Widget _searchField() {
+    return Container(
+      height: 38,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: kPanel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: kLine),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.search, size: 18, color: kMuted),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: _searchCtl,
+              focusNode: _searchFocus,
+              style: const TextStyle(fontSize: 14, color: kText),
+              cursorColor: kBrass,
+              textInputAction: TextInputAction.search,
+              decoration: const InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                hintText: '搜索歌名 / 歌手 / 文件名',
+                hintStyle: TextStyle(fontSize: 13, color: kMuted),
+              ),
+              onChanged: (String v) {
+                setState(() {
+                  _query = v;
+                });
+              },
+            ),
+          ),
+          // ✕ 只在有输入时出现，平时不占视觉噪音
+          if (_query.isNotEmpty)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque, // 扩大点击区，别被父级抢走
+              onTap: () {
+                _searchCtl.clear();
+                setState(() {
+                  _query = '';
+                });
+              },
+              child: const Padding(
+                padding: EdgeInsets.only(left: 8, top: 4, bottom: 4),
+                child: Icon(Icons.close, size: 18, color: kMuted),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _hint(String s) {
@@ -824,20 +969,26 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   Widget _songList() {
+    // N7：列表吃的是**过滤后的可见列表**，不是 _songs 本身。
+    final List<_Song> vis = _visList();
     return ListView.separated(
       padding: const EdgeInsets.only(bottom: 12),
-      itemCount: _songs.length,
+      itemCount: vis.length,
       separatorBuilder: (BuildContext c, int i) => const Divider(
         height: 1,
         thickness: 1,
         color: kLine,
       ),
       itemBuilder: (BuildContext c, int i) {
-        final _Song m = _songs[i];
-        final bool playing = i == _index;
+        final _Song m = vis[i];
+        final bool playing = _isPlaying(m); // N7：比对象，不比下标
         return InkWell(
           onTap: () {
-            _play(i);
+            // N7：先映射回 _songs 的**真实下标**再播。
+            // 🔴 直接 _play(i) 会播「全库第 i 首」＝ 完全不相干的歌（不报错，静默播错）
+            final int ri = _realIndex(m);
+            if (ri >= 0) _play(ri);
+            _searchFocus.unfocus(); // 收起键盘，别挡住播放条
           },
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 11),
