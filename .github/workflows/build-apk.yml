@@ -16,9 +16,12 @@
 #    N5：工作流一行都不用改（整库队列是纯 Dart 的事，靠 just_audio 的 setAudioSources）
 #    N6：+ assets/（评分种子）+ shared_preferences 依赖；工作流结构仍不用改
 #        （步骤 9 的 flutter pub get 会自动拉新依赖，asset 由 pubspec 声明）
-#    N7：工作流**也不用改** —— 搜索是纯 Dart 内存过滤，零新依赖；
-#        且 N6 那套 assets 声明已被删除（种子功能判定不该存在），
-#        推送文件列表里去掉了 assets/，会多一步删除仓库里的旧种子文件。
+#    N7：搜索是纯 Dart 内存过滤，零新依赖，**构建逻辑不用改**；
+#        但**第 11 步静态检查改了** —— 见该步骤处的详细说明：
+#        作用域收窄到 `lib/` 且「error 即失败」（原先 `|| true` 非阻断，
+#        语法/类型错误会溜到第 12 步真编译才炸，白烧约 1.5 分钟）。
+#        另：N6 那套 assets 声明已删除（种子功能判定不该存在），
+#        推送时会额外走一步「删除仓库里的旧种子文件」。
 # ============================================================================
 
 name: 构建 APK
@@ -296,8 +299,23 @@ jobs:
           if [ "$FAIL" != "0" ]; then exit 1; fi
           echo "✅ 两处硬伤均已修好"
 
-      - name: 11. 静态检查（只提示，不阻断构建）
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
+      # 🔴 N7 调整（原先只有 `|| true`，等于「只提示、不阻断」，代价很实在）：
+      #
+      #   为什么改成「error 即失败」：
+      #     `flutter analyze` 与第 12 步真正编译用的是**同一个分析器** ——
+      #     它报 error，编译就**必然**失败。既然结果一样，就不该让它溜到
+      #     第 12 步才炸：那一步要跑完 Gradle（约 2.5 分钟）才报错，
+      #     而这一步约 1 分钟就能给同样的结论。
+      #
+      #   为什么作用域收窄到 `lib/`：
+      #     release 构建只编译 lib/，**不编译 test/**。若对整个工程做 analyze，
+      #     test/ 里的模板文件一旦有问题（CI 第 7 步会重置它）就会误杀
+      #     本来能成功的构建。只查 lib/ ⇒ 判据与真实编译一致，零误杀。
+      #
+      #   `--no-fatal-infos --no-fatal-warnings` 保留 ⇒ info/warning 仍只是提示，
+      #   只有 **error** 才让这一步失败。
+      - name: 11. 静态检查（lib/ 报 error 即失败；info/warning 只提示）
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib
 
       - name: 12. 编译 release APK（全程留日志）
         run: |
