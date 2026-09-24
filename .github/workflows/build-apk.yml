@@ -209,15 +209,32 @@ jobs:
           if [ "$FAIL" != "0" ]; then exit 1; fi
           echo "✅ N4 后台播放所需的 manifest / Activity 改造全部就位"
 
-      - name: 8. 预生成 debug 签名（release 用 debug 签名，保证可以直接安装）
+      # ----------------------------------------------------------------------
+      #  🔴 N8.1 修复「每次升级星星全丢」：
+      #  旧写法在第 8 步用 `if [ ! -f ~/.android/debug.keystore ]` 判断要不要生成，
+      #  但 GitHub Actions 的构建机是一次性的 —— ~/.android 每次都为空，
+      #  于是【每一轮构建都生成一把全新的随机 RSA 钥匙】。
+      #  后果链：证书每轮都变 → 安卓拒绝覆盖安装（签名不符）→ 只能卸载重装
+      #  → 卸载会清掉应用数据 → 评分（SharedPreferences）全部归零。
+      #
+      #  修复：仓库固化 sign/debug.keystore。有 → 直接用（签名从此稳定）；
+      #  没有 → 生成一次，并把 keystore 作为产物吐出来，由人提交回仓库。
+      #  debug keystore 提交进私有仓库是可接受的（它不是生产机密）。
+      # ----------------------------------------------------------------------
+      - name: 8. 签名（优先用仓库固化 keystore，保证跨构建稳定）
         run: |
           mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
+          if [ -f sign/debug.keystore ]; then
+            cp sign/debug.keystore ~/.android/debug.keystore
+            echo "✅ 使用仓库固化的 keystore —— 签名稳定，覆盖安装不丢数据"
+          else
+            echo "::warning::仓库里没有 sign/debug.keystore —— 本次签名是新生成的钥匙（与历史版本不兼容！）。请下载 signing-keystore 产物并提交为 sign/debug.keystore"
             keytool -genkeypair -v \
               -keystore ~/.android/debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
+            cp ~/.android/debug.keystore minted-debug.keystore
           fi
           echo "✅ 签名就绪"
 
@@ -347,5 +364,17 @@ jobs:
         with:
           name: build-log
           path: build.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # N8.1：若本次是「新生成钥匙」（仓库还没有固化 keystore），
+      # 把它吐成产物，由人取回提交为 sign/debug.keystore。
+      # 仓库里已有 keystore 时这个文件不存在 → if-no-files-found: ignore 静默跳过。
+      - name: 15b. 上传本次生成的签名钥匙（如已固化则无此产物）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-keystore
+          path: minted-debug.keystore
           retention-days: 30
           if-no-files-found: ignore
