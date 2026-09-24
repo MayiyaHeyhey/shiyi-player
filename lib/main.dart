@@ -63,7 +63,7 @@ import 'package:on_audio_query/on_audio_query.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.8.0 · N8';
+const String kBuild = 'v0.8.1 · N8.1';
 
 // ===== 设计令牌（N8「深色潮玩 / dark neo-pop」，十一拍板 A+C，方案二·玩具总动员）=====
 // 两层结构：下面是 primitive（裸色板），widget 里按用途取用。
