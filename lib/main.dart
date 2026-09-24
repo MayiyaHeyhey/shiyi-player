@@ -63,37 +63,91 @@ import 'package:on_audio_query/on_audio_query.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-const String kBuild = 'v0.8.1 · N8.1';
+String kBuild = 'v0.9.0 · N9';
 
-// ===== 设计令牌（N8「深色潮玩 / dark neo-pop」，十一拍板 A+C，方案二·玩具总动员）=====
-// 两层结构：下面是 primitive（裸色板），widget 里按用途取用。
-// 🔴 将来加浅色主题/换主题，只动这一层，widget 代码一行不改 —— 这是 N8 买下的能力。
+// ===== 主题系统（N9 双主题：十一拍板「两个都要，分两期」）=====
+// 两套皮肤共用同一个形状骨架，差异集中在「潮玩浓度」这一个旋钮上：
+//   pop70 玩具总动员（一期，N8 已交付）：全员奶油勾边 + 处处硬投影 + 贴纸星星
+//   pop30 精密潮玩（二期，本节点新增）：勾边/投影只给重点，橙的预算砍半
 //
-// 三条硬纪律：
-//   ① 深色主题的层次**靠底色明度差**（inset < bg < panel < raised），不靠阴影
-//   ② 中性色全带 0.01~0.02 色度偏色 —— 纯黑/纯灰不存在于自然界，看着发死
-//   ③ 硬投影必须用实色 kShadow，**禁用 alpha 透明**（alpha 是调色板没做完的信号）
+// 🔴 为什么不再是 Color 全局常量：编译期定死的颜色**运行时切不了主题**。
+//    现在颜色住在 PopTheme 里，经 PopThemeScope（InheritedWidget）下发，
+//    widget 里一律 `pt.xxx` 取用；MaterialApp 的 ThemeData 只负责把
+//    accent/panel/text 同步给 Material 组件（FilledButton/Slider 等）。
 //
-// 对比度均按 WCAG 验过（对 kInk）：kText>12:1 / kMuted≈7:1 / kTextLow≈5:1 /
-// kAccent≈6.9:1 / kBlue≈5.5:1。⚠️ kTextLow 别再压暗 —— 第一版 #6B7385 只有 3.2:1。
-// ---- primitive：色板 ----
-const Color kInk = Color(0xFF0F131C); // 页面底（深靛蓝黑）
-const Color kInset = Color(0xFF0B0F16); // 凹槽（进度槽）
-const Color kPanel = Color(0xFF171C27); // 面板（播放条/卡片）
-const Color kRaised = Color(0xFF1E2433); // 悬浮（输入框/按键）
-const Color kShadow = Color(0xFF060910); // 硬投影（实色）
-const Color kLine = Color(0xFF2A3244); // 常规描边/分隔线
-const Color kStrokeStrong = Color(0xFFE8E4D8); // 重点勾边（奶油白）
-const Color kText = Color(0xFFF2EEE3); // 主文字（暖白）
-const Color kMuted = Color(0xFFA8B0C2); // 次文字（蓝灰）
-const Color kTextLow = Color(0xFF8890A4); // 弱文字
-const Color kAccent = Color(0xFFFF6B2C); // 电光橙：只给「正在发生」的事
-const Color kAccentDeep = Color(0xFFE04E17); // 橙·按压态
-const Color kAccentSoft = Color(0xFFFFB48A); // 橙·弱化（小号强调文字）
-const Color kBlue = Color(0xFF8FA0FF); // 长春花蓝：次级交互/焦点
-// ---- semantic：按用途 ----
-const Color kStarOff = Color(0xFF3A4256); // N8：未点亮的星（空心描边色，不再发花）
-const String kNumFont = 'SpaceGrotesk'; // N8：数字/时长展示体（静态 700 实例化）
+// 三条硬纪律不变：层次靠明度差不靠阴影 / 中性色带色度偏色 / 硬投影用实色禁 alpha。
+// 对比度（对各自 ink）：pop70 与 pop30 的全部文字/强调色均 ≥4.8:1。
+class PopTheme {
+  const PopTheme(this.id, this.ink, this.inset, this.panel, this.raised,
+      this.shadow, this.line, this.strokeStrong, this.text, this.muted,
+      this.textLow, this.accent, this.accentDeep, this.accentSoft, this.blue,
+      this.starOff, this.strongStrokeOnPanels, this.shadowOnPressables,
+      this.stickerStars);
+
+  final String id; // 'pop70' | 'pop30'（持久化与相等性判断都用它）
+  final Color ink, inset, panel, raised, shadow, line, strokeStrong;
+  final Color text, muted, textLow, accent, accentDeep, accentSoft, blue, starOff;
+  // —— 浓度开关（两个主题的真正差别在这里，不在色值）——
+  final bool strongStrokeOnPanels; // 面板/搜索框是否用奶油勾边强调
+  final bool shadowOnPressables; // 可按压元素是否都带硬投影
+  final bool stickerStars; // 点亮的星是否贴纸式歪斜
+
+  String get label => id == 'pop70' ? '玩具总动员' : '精密潮玩';
+
+  static const PopTheme pop70 = PopTheme(
+    'pop70',
+    Color(0xFF0F131C), Color(0xFF0B0F16), Color(0xFF171C27),
+    Color(0xFF1E2433), Color(0xFF060910), Color(0xFF2A3244),
+    Color(0xFFE8E4D8), Color(0xFFF2EEE3), Color(0xFFA8B0C2),
+    Color(0xFF8890A4), Color(0xFFFF6B2C), Color(0xFFE04E17),
+    Color(0xFFFFB48A), Color(0xFF8FA0FF), Color(0xFF3A4256),
+    true, true, true,
+  );
+
+  static const PopTheme pop30 = PopTheme(
+    'pop30',
+    Color(0xFF0C1117), Color(0xFF080C12), Color(0xFF131924),
+    Color(0xFF19202E), Color(0xFF05080D), Color(0xFF232B3A),
+    Color(0xFFC9D1DC), Color(0xFFE9ECF2), Color(0xFF9AA3B2),
+    Color(0xFF75808F), Color(0xFFE8703A), Color(0xFFC55A22),
+    Color(0xFFF2A97E), Color(0xFF7E8FE8), Color(0xFF2C3442),
+    false, false, false,
+  );
+
+  @override
+  bool operator ==(Object other) => other is PopTheme && other.id == id;
+
+  @override
+  int get hashCode => id.hashCode;
+}
+
+/// 把当前皮肤下发给整个组件树；widget 里 `PopThemeScope.of(context)` 取用。
+class PopThemeScope extends InheritedWidget {
+  const PopThemeScope({super.key, required this.theme, required super.child});
+
+  final PopTheme theme;
+
+  static PopTheme of(BuildContext c) =>
+      c.dependOnInheritedWidgetOfExactType<PopThemeScope>()!.theme;
+
+  @override
+  bool updateShouldNotify(PopThemeScope oldWidget) =>
+      oldWidget.theme != theme;
+}
+
+/// ThemeData 只承载 Material 组件需要的部分；皮肤本体走 PopThemeScope。
+ThemeData buildAppTheme(PopTheme t) => ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: t.ink,
+      colorScheme: ColorScheme.dark(
+        primary: t.accent,
+        surface: t.panel,
+        onSurface: t.text,
+      ),
+    );
+
+const String kNumFont = 'SpaceGrotesk'; // 数字/时长展示体（静态 700 实例化）
 
 // ---- 安全取值工具 ----
 // 插件字段的可空性在不同版本间会变（String / String? / bool?），
@@ -147,31 +201,82 @@ Future<void> main() async {
   runApp(const ShiyiPlayerApp());
 }
 
-class ShiyiPlayerApp extends StatelessWidget {
+/// 根组件：持有当前主题 id，切换时整树重建。
+/// 主题选择持久化在 SharedPreferencesAsync（与评分同一套存储）。
+class ShiyiPlayerApp extends StatefulWidget {
   const ShiyiPlayerApp({super.key});
 
   @override
+  State<ShiyiPlayerApp> createState() => _ShiyiPlayerAppState();
+}
+
+class _ShiyiPlayerAppState extends State<ShiyiPlayerApp> {
+  static const String _kThemeKey = 'shiyi_player_theme';
+
+  String _themeId = 'pop70'; // 默认 = 一期交付的「玩具总动员」
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTheme();
+  }
+
+  Future<void> _loadTheme() async {
+    String? saved;
+    try {
+      saved = await SharedPreferencesAsync().getString(_kThemeKey);
+    } catch (e) {
+      saved = null; // 读不出来就用默认主题，绝不让 App 起不来
+    }
+    if (!mounted) return;
+    if (saved == 'pop30' || saved == 'pop70') {
+      setState(() {
+        _themeId = saved!;
+      });
+    }
+  }
+
+  Future<void> _toggleTheme() async {
+    final String next = _themeId == 'pop70' ? 'pop30' : 'pop70';
+    setState(() {
+      _themeId = next;
+    });
+    try {
+      await SharedPreferencesAsync().setString(_kThemeKey, next);
+    } catch (e) {
+      // 存盘失败只影响「下次启动回到默认」，本次切换照常生效，不打扰用户
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final PopTheme pt = _themeId == 'pop30' ? PopTheme.pop30 : PopTheme.pop70;
     return MaterialApp(
       title: '接着奏乐',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: kInk,
-        colorScheme: const ColorScheme.dark(
-          primary: kAccent,
-          surface: kPanel,
-          onSurface: kText,
+      // 两套皮肤都是深色 —— 显式锁死 theme 通道，防止系统深浅色模式抢权
+      themeMode: ThemeMode.light,
+      theme: buildAppTheme(pt),
+      home: PopThemeScope(
+        theme: pt,
+        child: LibraryPage(
+          onToggleTheme: _toggleTheme,
+          themeName: pt.label,
         ),
       ),
-      home: const LibraryPage(),
     );
   }
 }
 
 class LibraryPage extends StatefulWidget {
-  const LibraryPage({super.key});
+  const LibraryPage({
+    super.key,
+    required this.onToggleTheme,
+    required this.themeName,
+  });
+
+  final VoidCallback onToggleTheme;
+  final String themeName;
 
   @override
   State<LibraryPage> createState() => _LibraryPageState();
@@ -217,7 +322,10 @@ class _LibraryPageState extends State<LibraryPage> {
   String _err = '';
 
   int _index = -1; // 正在播第几首，-1 = 没在播
-  double? _dragMs; // 拖动进度条时的临时值（避免被 positionStream 拉回）
+  double? _dragMs;
+
+  /// 当前皮肤。State 级 getter —— 本类所有方法直接 `pt.xxx` 取用。
+  PopTheme get pt => PopThemeScope.of(context); // 拖动进度条时的临时值（避免被 positionStream 拉回）
   bool _playPressed = false; // N8 方案二：主播放键「按下下沉」的状态
 
   @override
@@ -693,22 +801,29 @@ class _LibraryPageState extends State<LibraryPage> {
               Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: <Widget>[
-                  const Expanded(
+                  Expanded(
                     child: Text(
                       '接着奏乐',
                       style: TextStyle(
                         fontSize: 26,
                         fontWeight: FontWeight.w800,
-                        color: kText,
+                        color: pt.text,
                         letterSpacing: 1.0,
                         height: 1.1,
                       ),
                     ),
                   ),
+                  // N9：主题切换入口。点一下在「玩具总动员 / 精密潮玩」间来回
+                  IconButton(
+                    tooltip: '切换主题（当前：${widget.themeName}）',
+                    onPressed: widget.onToggleTheme,
+                    icon: const Icon(Icons.palette_outlined),
+                    color: pt.muted,
+                  ),
                   TextButton(
                     style: TextButton.styleFrom(
-                      foregroundColor: kMuted,
-                      textStyle: const TextStyle(fontSize: 12.5),
+                      foregroundColor: pt.muted,
+                      textStyle: TextStyle(fontSize: 12.5),
                     ),
                     onPressed: () {
                       _load();
@@ -724,9 +839,9 @@ class _LibraryPageState extends State<LibraryPage> {
                       _subtitle(),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12.5,
-                        color: kAccentSoft,
+                        color: pt.accentSoft,
                         letterSpacing: 1.2,
                       ),
                     ),
@@ -737,7 +852,7 @@ class _LibraryPageState extends State<LibraryPage> {
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       minimumSize: const Size(0, 30),
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      foregroundColor: kBlue,
+                      foregroundColor: pt.blue,
                     ),
                     onPressed: _stage == 'ready'
                         ? () {
@@ -746,7 +861,7 @@ class _LibraryPageState extends State<LibraryPage> {
                         : null,
                     child: Text(
                       _sortMode == 'stars' ? '排序：按星级' : '排序：按标题',
-                      style: const TextStyle(fontSize: 12, letterSpacing: 0.5),
+                      style: TextStyle(fontSize: 12, letterSpacing: 0.5),
                     ),
                   ),
                 ],
@@ -830,32 +945,39 @@ class _LibraryPageState extends State<LibraryPage> {
       height: 40,
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
-        color: kRaised,
+        color: pt.raised,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: focused ? kBlue : kStrokeStrong,
-          width: focused ? 1.8 : 1.4,
+          // N9：pop70 用奶油勾边强调，pop30 收敛为常规细线；聚焦时统一变蓝加粗
+          color: focused
+              ? pt.blue
+              : (pt.strongStrokeOnPanels ? pt.strokeStrong : pt.line),
+          width: focused ? 1.8 : (pt.strongStrokeOnPanels ? 1.4 : 1.2),
         ),
-        boxShadow: const <BoxShadow>[
-          BoxShadow(color: kShadow, offset: Offset(0, 2), blurRadius: 0),
-        ],
+        // N9：pop30 的可按压元素不带投影 —— 硬投影只留给播放条
+        boxShadow: pt.shadowOnPressables
+            ? <BoxShadow>[
+                BoxShadow(
+                    color: pt.shadow, offset: Offset(0, 2), blurRadius: 0),
+              ]
+            : null,
       ),
       child: Row(
         children: <Widget>[
-          Icon(Icons.search, size: 18, color: focused ? kBlue : kTextLow),
+          Icon(Icons.search, size: 18, color: focused ? pt.blue : pt.textLow),
           const SizedBox(width: 8),
           Expanded(
             child: TextField(
               controller: _searchCtl,
               focusNode: _searchFocus,
-              style: const TextStyle(fontSize: 14, color: kText),
-              cursorColor: kAccent,
+              style: TextStyle(fontSize: 14, color: pt.text),
+              cursorColor: pt.accent,
               textInputAction: TextInputAction.search,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 isDense: true,
                 border: InputBorder.none,
                 hintText: '搜索歌名 / 歌手 / 文件名',
-                hintStyle: TextStyle(fontSize: 13, color: kTextLow),
+                hintStyle: TextStyle(fontSize: 13, color: pt.textLow),
               ),
               onChanged: (String v) {
                 setState(() {
@@ -874,9 +996,9 @@ class _LibraryPageState extends State<LibraryPage> {
                   _searchText = '';
                 });
               },
-              child: const Padding(
+              child: Padding(
                 padding: EdgeInsets.only(left: 8, top: 4, bottom: 4),
-                child: Icon(Icons.close, size: 18, color: kMuted),
+                child: Icon(Icons.close, size: 18, color: pt.muted),
               ),
             ),
         ],
@@ -891,7 +1013,7 @@ class _LibraryPageState extends State<LibraryPage> {
         child: Text(
           s,
           textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 13.5, color: kMuted, height: 1.6),
+          style: TextStyle(fontSize: 13.5, color: pt.muted, height: 1.6),
         ),
       ),
     );
@@ -902,30 +1024,36 @@ class _LibraryPageState extends State<LibraryPage> {
       child: Container(
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
         decoration: BoxDecoration(
-          color: kPanel,
+          color: pt.panel,
           borderRadius: BorderRadius.circular(20),
-          // N8 方案二：面板统一「奶油勾边 + 硬投影」
-          border: Border.all(color: kStrokeStrong, width: 2),
-          boxShadow: const <BoxShadow>[
-            BoxShadow(color: kShadow, offset: Offset(0, 3), blurRadius: 0),
-          ],
+          // N9：浓度开关 —— pop70 奶油勾边+投影，pop30 细线无投影
+          border: Border.all(
+            color: pt.strongStrokeOnPanels ? pt.strokeStrong : pt.line,
+            width: pt.strongStrokeOnPanels ? 2 : 1.2,
+          ),
+          boxShadow: pt.shadowOnPressables
+              ? <BoxShadow>[
+                  BoxShadow(
+                      color: pt.shadow, offset: Offset(0, 3), blurRadius: 0),
+                ]
+              : null,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const Text(
+            Text(
               '需要「音乐和音频」权限',
               style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
-                color: kText,
+                color: pt.text,
               ),
             ),
             const SizedBox(height: 10),
-            const Text(
+            Text(
               '安卓 13 起，读取本地音乐要单独授权。\n点下面的按钮，在系统弹窗里选「允许」。',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: kMuted, height: 1.55),
+              style: TextStyle(fontSize: 13, color: pt.muted, height: 1.55),
             ),
             const SizedBox(height: 16),
             SizedBox(
@@ -950,23 +1078,23 @@ class _LibraryPageState extends State<LibraryPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const Text(
+            Text(
               '权限没问题，但一首歌都没扫到',
               style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
-                color: kText,
+                color: pt.text,
               ),
             ),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               '最常见的两个原因：\n\n'
               '1. 音乐被放在了 Android/data/… 里面\n'
               '   （安卓 11 起系统不索引这个目录，任何播放器都扫不到）\n\n'
               '2. 刚拷进来，系统媒体库还没入库\n\n'
               '办法：把音乐挪到「内部存储 / Music /」或「Download /」，'
               '再点右上角「重新扫描」。',
-              style: TextStyle(fontSize: 12.5, color: kMuted, height: 1.6),
+              style: TextStyle(fontSize: 12.5, color: pt.muted, height: 1.6),
             ),
             const SizedBox(height: 18),
             OutlinedButton(
@@ -1003,13 +1131,13 @@ class _LibraryPageState extends State<LibraryPage> {
             // 左右各 2px：把点击热区从 16px 撑到 20px，手指才点得准
             padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
             child: Transform.rotate(
-              // N8 方案二·贴纸感：点亮的星按位置交替歪一点点 ——
-              // 齐整里藏一点「手贴上去」的乱；没亮的保持端正（不满屏乱晃）
-              angle: on ? (i.isEven ? 0.07 : -0.07) : 0,
+              // N8 方案二·贴纸感：点亮的星按位置交替歪一点点。
+              // N9：歪不歪由主题定 —— pop30「精密潮玩」不歪（浓度开关 stickerStars）
+              angle: on && pt.stickerStars ? (i.isEven ? 0.07 : -0.07) : 0,
               child: Icon(
                 on ? Icons.star_rounded : Icons.star_outline_rounded,
                 size: 17,
-                color: on ? kAccent : kStarOff,
+                color: on ? pt.accent : pt.starOff,
               ),
             ),
           ),
@@ -1024,10 +1152,10 @@ class _LibraryPageState extends State<LibraryPage> {
     return ListView.separated(
       padding: const EdgeInsets.only(bottom: 12),
       itemCount: vis.length,
-      separatorBuilder: (BuildContext c, int i) => const Divider(
+      separatorBuilder: (BuildContext c, int i) => Divider(
         height: 1,
         thickness: 1,
-        color: kLine,
+        color: pt.line,
       ),
       itemBuilder: (BuildContext c, int i) {
         final _Song m = vis[i];
@@ -1045,9 +1173,9 @@ class _LibraryPageState extends State<LibraryPage> {
             // 没在播的行不加任何装饰 —— 勾边只给重点，满屏勾边等于没有重点
             decoration: playing
                 ? BoxDecoration(
-                    color: kPanel,
+                    color: pt.panel,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: kStrokeStrong, width: 1.6),
+                    border: Border.all(color: pt.strokeStrong, width: 1.6),
                   )
                 : null,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
@@ -1063,7 +1191,7 @@ class _LibraryPageState extends State<LibraryPage> {
                       fontFamily: kNumFont,
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
-                      color: playing ? kAccent : kTextLow,
+                      color: playing ? pt.accent : pt.textLow,
                       letterSpacing: 0.3,
                     ),
                   ),
@@ -1082,7 +1210,7 @@ class _LibraryPageState extends State<LibraryPage> {
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontSize: 14.5,
-                                color: playing ? kAccent : kText,
+                                color: playing ? pt.accent : pt.text,
                                 fontWeight: playing
                                     ? FontWeight.w700
                                     : FontWeight.w500,
@@ -1090,7 +1218,7 @@ class _LibraryPageState extends State<LibraryPage> {
                             ),
                           ),
                           const SizedBox(width: 10),
-                          // N8：时长换展示体数字；颜色压到 kTextLow ——
+                          // N8：时长换展示体数字；颜色压到 pt.textLow ——
                           // 橙的预算留给「正在发生」，不能花在每行的时长上
                           Text(
                             m.dur,
@@ -1098,7 +1226,7 @@ class _LibraryPageState extends State<LibraryPage> {
                               fontFamily: kNumFont,
                               fontSize: 12,
                               fontWeight: FontWeight.w700,
-                              color: playing ? kAccentSoft : kTextLow,
+                              color: playing ? pt.accentSoft : pt.textLow,
                               letterSpacing: 0.2,
                             ),
                           ),
@@ -1113,7 +1241,7 @@ class _LibraryPageState extends State<LibraryPage> {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style:
-                                  const TextStyle(fontSize: 12, color: kMuted),
+                                  TextStyle(fontSize: 12, color: pt.muted),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -1138,13 +1266,16 @@ class _LibraryPageState extends State<LibraryPage> {
       margin: const EdgeInsets.only(top: 6, bottom: 10),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
       decoration: BoxDecoration(
-        color: kPanel,
+        color: pt.panel,
         borderRadius: BorderRadius.circular(20),
-        // N8 方案二：播放条是全 App 的「主角框」—— 奶油白 2dp 勾边 + 硬投影
-        border: Border.all(color: kStrokeStrong, width: 2),
-        boxShadow: const <BoxShadow>[
-          // 硬投影：实色、零模糊 —— 阴影的边缘是「切」出来的，不是晕开的
-          BoxShadow(color: kShadow, offset: Offset(0, 3), blurRadius: 0),
+        // 播放条是全 App 的「主角框」：勾边+硬投影两套主题都保留，
+        // 只有勾边强弱随浓度走（pop30 换成细一点的常规线）
+        border: Border.all(
+          color: pt.strongStrokeOnPanels ? pt.strokeStrong : pt.line,
+          width: pt.strongStrokeOnPanels ? 2 : 1.2,
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(color: pt.shadow, offset: Offset(0, 3), blurRadius: 0),
         ],
       ),
       child: Column(
@@ -1160,10 +1291,10 @@ class _LibraryPageState extends State<LibraryPage> {
                       s.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
-                        color: kAccent,
+                        color: pt.accent,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -1171,15 +1302,15 @@ class _LibraryPageState extends State<LibraryPage> {
                       s.artist.isEmpty ? '未知歌手' : s.artist,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11.5, color: kMuted),
+                      style: TextStyle(fontSize: 11.5, color: pt.muted),
                     ),
                   ],
                 ),
               ),
               IconButton(
                 onPressed: _prev,
-                icon: const Icon(Icons.skip_previous),
-                color: kText,
+                icon: Icon(Icons.skip_previous),
+                color: pt.text,
                 tooltip: '上一首',
               ),
               StreamBuilder<PlayerState>(
@@ -1221,14 +1352,14 @@ class _LibraryPageState extends State<LibraryPage> {
                       transform: Matrix4.translationValues(
                           0, _playPressed ? 3 : 0, 0),
                       decoration: BoxDecoration(
-                        color: _playPressed ? kAccentDeep : kAccent,
+                        color: _playPressed ? pt.accentDeep : pt.accent,
                         shape: BoxShape.circle,
-                        border: Border.all(color: kStrokeStrong, width: 2),
+                        border: Border.all(color: pt.strokeStrong, width: 2),
                         boxShadow: _playPressed
-                            ? const <BoxShadow>[]
-                            : const <BoxShadow>[
+                            ? <BoxShadow>[]
+                            : <BoxShadow>[
                                 BoxShadow(
-                                    color: kShadow,
+                                    color: pt.shadow,
                                     offset: Offset(0, 3),
                                     blurRadius: 0),
                               ],
@@ -1236,7 +1367,7 @@ class _LibraryPageState extends State<LibraryPage> {
                       child: Icon(
                         playing ? Icons.pause : Icons.play_arrow,
                         size: 32,
-                        color: kInk, // 图标「挖空」成底色 —— 印刷感，不是系统感
+                        color: pt.ink, // 图标「挖空」成底色 —— 印刷感，不是系统感
                       ),
                     ),
                   );
@@ -1244,8 +1375,8 @@ class _LibraryPageState extends State<LibraryPage> {
               ),
               IconButton(
                 onPressed: _next,
-                icon: const Icon(Icons.skip_next),
-                color: kText,
+                icon: Icon(Icons.skip_next),
+                color: pt.text,
                 tooltip: '下一首',
               ),
             ],
@@ -1283,8 +1414,8 @@ class _LibraryPageState extends State<LibraryPage> {
                   child: Slider(
                     value: val,
                     max: maxMs,
-                    activeColor: kAccent,
-                    inactiveColor: kInset,
+                    activeColor: pt.accent,
+                    inactiveColor: pt.inset,
                     onChanged: totalMs > 0
                         ? (double v) {
                             setState(() {
@@ -1308,21 +1439,21 @@ class _LibraryPageState extends State<LibraryPage> {
                     children: <Widget>[
                       Text(
                         _mmss(posMs),
-                        style: const TextStyle(
+                        style: TextStyle(
                             fontFamily: kNumFont,
                             fontSize: 11.5,
                             fontWeight: FontWeight.w700,
-                            color: kMuted,
+                            color: pt.muted,
                             letterSpacing: 0.3),
                       ),
                       const Spacer(),
                       Text(
                         _mmss(totalMs),
-                        style: const TextStyle(
+                        style: TextStyle(
                             fontFamily: kNumFont,
                             fontSize: 11.5,
                             fontWeight: FontWeight.w700,
-                            color: kMuted,
+                            color: pt.muted,
                             letterSpacing: 0.3),
                       ),
                     ],
