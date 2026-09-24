@@ -16,7 +16,7 @@
 name: shiyi_player
 description: "十一 · 接着奏乐 —— 本地离线音乐播放器（Android）"
 publish_to: 'none'
-version: 0.8.0+9
+version: 0.8.1+10
 
 environment:
   # 不写上界，兼容未来更高版本的 Dart
