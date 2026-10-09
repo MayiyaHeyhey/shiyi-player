@@ -55,6 +55,7 @@
 // ============================================================================
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show ImageFilter; // N10：播放页的模糊背景要用
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
@@ -63,7 +64,7 @@ import 'package:on_audio_query/on_audio_query.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-String kBuild = 'v0.9.0 · N9';
+String kBuild = 'v0.10.0 · N10';
 
 // ===== 主题系统（N9 双主题：十一拍板「两个都要，分两期」）=====
 // 两套皮肤共用同一个形状骨架，差异集中在「潮玩浓度」这一个旋钮上：
@@ -76,7 +77,8 @@ String kBuild = 'v0.9.0 · N9';
 //    accent/panel/text 同步给 Material 组件（FilledButton/Slider 等）。
 //
 // 三条硬纪律不变：层次靠明度差不靠阴影 / 中性色带色度偏色 / 硬投影用实色禁 alpha。
-// 对比度（对各自 ink）：pop70 与 pop30 的全部文字/强调色均 ≥4.8:1。
+// 对比度（对 ink #14100C）：正文约 14:1 / 次要约 6.8:1 / 弱化约 4.6:1 / 琥珀约 5.9:1。
+// ⚠️ 均为公式估算，不是实测 —— 真机上若弱化色（时长/序号）看着发虚，再往上提一档。
 class PopTheme {
   const PopTheme(this.id, this.ink, this.inset, this.panel, this.raised,
       this.shadow, this.line, this.strokeStrong, this.text, this.muted,
@@ -92,25 +94,32 @@ class PopTheme {
   final bool shadowOnPressables; // 可按压元素是否都带硬投影
   final bool stickerStars; // 点亮的星是否贴纸式歪斜
 
-  String get label => id == 'pop70' ? '玩具总动员' : '精密潮玩';
+  String get label => id == 'pop70' ? '暖胶·黑胶夜' : '暖胶·浅暖纸（待做）';
 
+  // N10：暖胶 / 复古唱片 —— 目前只做这一套深色（黑胶夜）。
+  //
+  // 为什么 pop30 也填成同一套值：主题 id 是持久化在手机里的，老值可能是 'pop30'。
+  // 若只改 pop70，存了 'pop30' 的手机会打开旧的蓝黑皮肤 —— 那是迁移事故。
+  // 两个实例同值 ⇒ 无论持久化值是哪个，打开都是暖胶，零迁移成本。
+  // 第二套（浅暖纸，对应参考图 2）留到 N11：届时只改 pop30 的值 + 把切换入口加回来。
   static const PopTheme pop70 = PopTheme(
     'pop70',
-    Color(0xFF0F131C), Color(0xFF0B0F16), Color(0xFF171C27),
-    Color(0xFF1E2433), Color(0xFF060910), Color(0xFF2A3244),
-    Color(0xFFE8E4D8), Color(0xFFF2EEE3), Color(0xFFA8B0C2),
-    Color(0xFF8890A4), Color(0xFFFF6B2C), Color(0xFFE04E17),
-    Color(0xFFFFB48A), Color(0xFF8FA0FF), Color(0xFF3A4256),
-    true, true, true,
+    Color(0xFF14100C), Color(0xFF0E0B08), Color(0xFF1E1811),
+    Color(0xFF262019), Color(0xFF070503), Color(0xFF3A3026),
+    Color(0xFFE8DCC8), Color(0xFFF2E8D9), Color(0xFFA89880),
+    Color(0xFF8B7C68), Color(0xFFDE8636), Color(0xFFB45F1E),
+    Color(0xFFF0BE86), Color(0xFF8C9C7A), Color(0xFF4A4034),
+    false, false, false,
   );
 
+  // 同 pop70（见上：预留给 N11 的浅暖纸，先填同值保证迁移安全）
   static const PopTheme pop30 = PopTheme(
     'pop30',
-    Color(0xFF0C1117), Color(0xFF080C12), Color(0xFF131924),
-    Color(0xFF19202E), Color(0xFF05080D), Color(0xFF232B3A),
-    Color(0xFFC9D1DC), Color(0xFFE9ECF2), Color(0xFF9AA3B2),
-    Color(0xFF75808F), Color(0xFFE8703A), Color(0xFFC55A22),
-    Color(0xFFF2A97E), Color(0xFF7E8FE8), Color(0xFF2C3442),
+    Color(0xFF14100C), Color(0xFF0E0B08), Color(0xFF1E1811),
+    Color(0xFF262019), Color(0xFF070503), Color(0xFF3A3026),
+    Color(0xFFE8DCC8), Color(0xFFF2E8D9), Color(0xFFA89880),
+    Color(0xFF8B7C68), Color(0xFFDE8636), Color(0xFFB45F1E),
+    Color(0xFFF0BE86), Color(0xFF8C9C7A), Color(0xFF4A4034),
     false, false, false,
   );
 
@@ -174,7 +183,7 @@ String _mmss(dynamic raw) {
 /// 这样界面层永远不会因为插件字段为 null 而崩。
 class _Song {
   _Song(this.title, this.artist, this.dur, this.durMs, this.isMusic, this.uri,
-      this.data, this.fileName);
+      this.data, this.fileName, this.id);
   final String title;
   final String artist;
   final String dur; // 已格式化好的 m:ss（列表右侧显示用）
@@ -186,6 +195,12 @@ class _Song {
   // 选它的三个理由：① 与电脑版 ratings.json 同构，评分可直接搬过来
   // ② 不受「曲名取不到标签」的兜底值影响 ③ 不随排序变化而漂移
   final String fileName;
+
+  // N10：MediaStore 的歌曲 id —— **唯一的用途是取专辑封面**
+  //      （QueryArtworkWidget 的 id 参数是必填 int，没有它就取不到封面）。
+  // ⚠️ 绝不拿它当持久化键：id 由系统分配，重新扫描后可能变，
+  //    用它存评分会漂移 —— 评分键永远是上面的 fileName。
+  final int id;
 }
 
 Future<void> main() async {
@@ -303,6 +318,14 @@ class _LibraryPageState extends State<LibraryPage> {
   Map<String, int> _stars = <String, int>{};
   static const String _kStarsKey = 'shiyi_mobile_ratings_v1';
   int _ratedCount = 0; // 曲库里已评分的首数（副标题显示用）
+
+  // ===== N10：移除 = App 内标记隐藏 =====
+  // 🔴 只记一个文件名黑名单，**一个字节的文件都不动**。
+  //    手机扫描的是全盘媒体库，不是 App 自己的文件夹 —— 移动系统媒体文件既可能
+  //    被 Android 分区存储拒绝，语义也怪（用户只是不想在列表里看到它，不是要删歌）。
+  //    键同样用文件名（与评分同一套理由），随时可恢复。
+  Set<String> _hidden = <String>{};
+  static const String _kHiddenKey = 'shiyi_player_hidden_v1';
   int _sameNameGroups = 0; // 诊断：曲库里有几组同名文件（同名会共享同一份评分）
 
   // 排序模式：'title' 按标题升序（默认） | 'stars' 按星级降序
@@ -353,6 +376,7 @@ class _LibraryPageState extends State<LibraryPage> {
     _ciSub?.cancel();
     _searchCtl.dispose(); // N7
     _searchFocus.dispose(); // N7
+    _sleepTimer?.cancel(); // N10：睡眠定时
     _player.dispose();
     super.dispose();
   }
@@ -377,6 +401,8 @@ class _LibraryPageState extends State<LibraryPage> {
     }
     // N6：先把评分读出来，_load() 里统计「已评 N 首」才是准的
     await _loadStars();
+    // N10：隐藏名单也要**先于** _load() 读出来，否则扫描时过滤不到
+    await _loadHidden();
     await _load();
   }
 
@@ -429,9 +455,13 @@ class _LibraryPageState extends State<LibraryPage> {
           .where((_Song s) => s.uri.isNotEmpty || s.data.isNotEmpty)
           .toList();
 
+      // N10：剔除被「移除」的歌（App 内标记隐藏）。只是不纳入列表，文件没动。
+      final List<_Song> shown =
+          kept.where((_Song s) => !_hidden.contains(s.fileName)).toList();
+
       if (!mounted) return;
       setState(() {
-        _songs = kept;
+        _songs = shown;
         _sortSongs(); // N6：按当前排序模式排列（默认按标题）
         _filteredOut = all.length - kept.length;
         _stage = kept.isEmpty ? 'empty' : 'ready';
@@ -529,8 +559,18 @@ class _LibraryPageState extends State<LibraryPage> {
       fileName = data.split('/').last; // 兜底：从真实路径取末段
     }
 
+    // N10：封面钥匙（QueryArtworkWidget 的必填参数）。
+    // 取不到给 0 —— 0 不是合法的音乐 id，组件会走 nullArtworkWidget 兜底，
+    // 既不会崩，也不会错显示成别的歌的封面。
+    int id = 0;
+    try {
+      id = m.id;
+    } catch (e) {
+      id = 0;
+    }
+
     return _Song(title.isEmpty ? '未知曲目' : title, artist, _mmss(durMs), durMs,
-        isMusic, uri, data, fileName);
+        isMusic, uri, data, fileName, id);
   }
 
   // ===== N6：评分 =====
@@ -578,6 +618,196 @@ class _LibraryPageState extends State<LibraryPage> {
     } catch (e) {
       // 忽略：这次没存住而已
     }
+  }
+
+  // ===== N10：移除（App 内隐藏，不动文件）=====
+
+  Future<void> _loadHidden() async {
+    String? raw;
+    try {
+      raw = await SharedPreferencesAsync().getString(_kHiddenKey);
+    } catch (e) {
+      raw = null; // 读不出来就当「没隐藏任何歌」，绝不因此让 App 起不来
+    }
+    final Set<String> m = <String>{};
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final Object? j = jsonDecode(raw);
+        if (j is List) {
+          for (final Object? v in j) {
+            if (v != null) m.add('$v');
+          }
+        }
+      } catch (e) {
+        // 数据坏了就当空，不崩
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _hidden = m;
+    });
+  }
+
+  Future<void> _saveHidden() async {
+    try {
+      await SharedPreferencesAsync()
+          .setString(_kHiddenKey, jsonEncode(_hidden.toList()));
+    } catch (e) {
+      // 忽略：这次没存住而已
+    }
+  }
+
+  void _toast(String s) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(s), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  /// 长按一首歌 → 底部菜单。
+  void _showSongMenu(_Song s) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: pt.panel,
+      builder: (BuildContext c) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              ListTile(
+                leading: Icon(Icons.visibility_off_outlined, color: pt.muted),
+                title: Text('不再显示这首歌',
+                    style: TextStyle(fontSize: 15, color: pt.text)),
+                subtitle: Text(
+                  s.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, color: pt.textLow),
+                ),
+                onTap: () {
+                  Navigator.pop(c);
+                  _hide(s);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 隐藏一首歌（只记黑名单，文件一个字节都不动）。
+  ///
+  /// 🔴 列表一变，N5 那条「队列顺序 = 列表顺序」的对应关系就断了 ——
+  ///    所以必须照 _setSort 的套路来：**作废并重建队列**。
+  ///    不这么做的话界面高亮会指到别的歌，甚至播的还是旧列表里那一首。
+  Future<void> _hide(_Song s) async {
+    if (s.fileName.isEmpty) return; // 拿不到文件名就没法存
+
+    final bool hidingPlaying =
+        _index >= 0 && _index < _songs.length && _isPlaying(s);
+    final _Song? playing =
+        (_index >= 0 && _index < _songs.length) ? _songs[_index] : null;
+    final Duration pos = _player.position;
+
+    setState(() {
+      _hidden.add(s.fileName);
+      _songs.removeWhere((_Song x) => x.fileName == s.fileName);
+    });
+    await _saveHidden();
+    _toast('已隐藏「${s.title}」· 可在「已隐藏」里恢复');
+
+    // 正在播的就是这首 ⇒ 它已经不在列表里了，直接停掉最干净，
+    // 不留「播着一首列表里没有的歌」这种状态不一致。
+    if (hidingPlaying) {
+      try {
+        await _player.stop();
+      } catch (e) {
+        // 忽略
+      }
+      if (!mounted) return;
+      setState(() {
+        _index = -1;
+        _sources = null;
+      });
+      return;
+    }
+
+    if (playing == null) {
+      _sources = null; // 没在播：只作废队列，下次点歌自然会重建
+      return;
+    }
+
+    final int ni = _songs.indexWhere(
+        (_Song x) => x.fileName == playing.fileName && x.uri == playing.uri);
+    if (ni < 0) {
+      _sources = null;
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _index = ni;
+      });
+    }
+    try {
+      final List<AudioSource> built = _buildSources();
+      await _player.setAudioSources(built,
+          initialIndex: ni, initialPosition: pos);
+      await _player.setLoopMode(LoopMode.all);
+    } catch (e) {
+      _sources = null;
+    }
+  }
+
+  /// 恢复：重新扫描把歌加回列表（增量插入容易写错下标，重扫最稳）。
+  Future<void> _unhide(String fileName) async {
+    setState(() {
+      _hidden.remove(fileName);
+    });
+    await _saveHidden();
+    await _load();
+  }
+
+  /// 已隐藏清单，点某首即恢复。
+  void _showHiddenSheet() {
+    final List<String> names = _hidden.toList()..sort();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: pt.panel,
+      builder: (BuildContext c) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                child: Text(
+                  '已隐藏 ${names.length} 首 · 点一下恢复',
+                  style: TextStyle(fontSize: 13, color: pt.muted),
+                ),
+              ),
+              ListView.builder(
+                shrinkWrap: true,
+                itemCount: names.length,
+                itemBuilder: (BuildContext c2, int i) {
+                  return ListTile(
+                    title: Text(names[i],
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 14, color: pt.text)),
+                    trailing: Icon(Icons.undo, size: 18, color: pt.accent),
+                    onTap: () {
+                      Navigator.pop(c);
+                      _unhide(names[i]);
+                    },
+                  );
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   /// 点第 n 颗星。**再点同一颗 = 取消评分**（给错了得能退）。
@@ -805,21 +1035,19 @@ class _LibraryPageState extends State<LibraryPage> {
                     child: Text(
                       '接着奏乐',
                       style: TextStyle(
-                        fontSize: 26,
+                        // N10：26→28、字距 1.0→2.0 ——
+                        // 中文大标题松开字距才有「唱片内页」的排版味
+                        fontSize: 28,
                         fontWeight: FontWeight.w800,
                         color: pt.text,
-                        letterSpacing: 1.0,
+                        letterSpacing: 2.0,
                         height: 1.1,
                       ),
                     ),
                   ),
-                  // N9：主题切换入口。点一下在「玩具总动员 / 精密潮玩」间来回
-                  IconButton(
-                    tooltip: '切换主题（当前：${widget.themeName}）',
-                    onPressed: widget.onToggleTheme,
-                    icon: const Icon(Icons.palette_outlined),
-                    color: pt.muted,
-                  ),
+                  // N10：主题切换入口**已撤** —— 目前只有一套暖胶，
+                  //     点了没变化反而像个 bug。切换机制（onToggleTheme / themeName）
+                  //     完整保留在代码里，N11 加浅暖纸时把这个按钮加回来即可。
                   TextButton(
                     style: TextButton.styleFrom(
                       foregroundColor: pt.muted,
@@ -864,6 +1092,22 @@ class _LibraryPageState extends State<LibraryPage> {
                       style: TextStyle(fontSize: 12, letterSpacing: 0.5),
                     ),
                   ),
+                  // N10：恢复入口**必须放在标题栏**，不能放列表底部 ——
+                  // 万一所有歌都被隐藏，列表空了、底部入口跟着消失 ⇒ 用户再也恢复不回来。
+                  if (_hidden.isNotEmpty)
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 30),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        foregroundColor: pt.muted,
+                      ),
+                      onPressed: _showHiddenSheet,
+                      child: Text(
+                        '已隐藏 ${_hidden.length}',
+                        style: TextStyle(fontSize: 12, letterSpacing: 0.5),
+                      ),
+                    ),
                 ],
               ),
               // N7：搜索框。**常驻单行**（比「点图标再展开」少一次点击）。
@@ -884,33 +1128,40 @@ class _LibraryPageState extends State<LibraryPage> {
 
   String _subtitle() {
     if (_stage == 'ready') {
-      // 顺序即优先级：「已评」和「同名警告」比「滤掉多少首」重要，所以放前面
-      //
-      // 🔴 N6 踩坑修正（详见 节点进度.md §二十二）：
-      //   旧写法是 `_ratedCount > 0 ? ' · 已评 N 首' : ''` —— **零值时整段消失**，
-      //   而「评分一条都没匹配上」恰恰就是零值那种情况，结果失败在界面上
-      //   看起来像「功能没做出来」，用户无法提供任何线索。
-      //   ⇒ 规则：关键计数恒常显示，绝不在零值时隐藏。
-      //
-      // 另附「找不到对应文件的评分条数」作为判别量：
-      //   正常情况下 _stars.length == _ratedCount（用户打几首就是几首）；
-      //   若 _stars.length > _ratedCount，多出来的就是「存着但曲库里没有的」——
-      //   种子导入后文件名对不上时，就是这个形态，一眼可分。
-      final int orphan = _stars.length - _ratedCount;
-      final String star = ' · 已评 $_ratedCount 首'
-          '${orphan > 0 ? '（另有 $orphan 条找不到对应文件）' : ''}';
-      final String dup =
-          _sameNameGroups > 0 ? ' · ⚠️ $_sameNameGroups 组同名' : '';
-      final String extra =
-          _filteredOut > 0 ? ' · 已滤掉 $_filteredOut 首铃声/提示音' : '';
       // N7：搜索命中数。延续「关键计数恒常显示」纪律 ——
       //     搜索时必须能看到命中几首，否则「列表怎么空了」和「搜不到」
       //     在界面上长得一模一样，用户无法区分。
       final String hit =
           _searchText.trim().isEmpty ? '' : ' · 找到 ${_visList().length} 首';
-      return '共 ${_songs.length} 首$hit$star$dup$extra';
+      return '共 ${_songs.length} 首$hit';
     }
     return '手机版 · 曲库 $kBuild';
+  }
+
+  /// N10：诊断串 —— 从标题正下方**挪到列表底部**的小字。
+  ///
+  /// 🔴 这是「换位置」，不是「隐藏」：这三条计数在排查问题时是唯一线索，
+  ///    恒常显示（零值也显示）的纪律一条不改，见下面对 N6 踩坑的引用。
+  Widget _diagnosticsLine() {
+    if (_stage != 'ready') return const SizedBox.shrink();
+    // 🔴 N6 踩坑修正（详见 节点进度.md §二十二）：
+    //   旧写法「零值时整段消失」，而「评分一条都没匹配上」恰恰就是零值，
+    //   结果失败在界面上看起来像「功能没做出来」，用户无法提供任何线索。
+    final int orphan = _stars.length - _ratedCount;
+    final String star = '已评 $_ratedCount 首'
+        '${orphan > 0 ? '（另有 $orphan 条找不到对应文件）' : ''}';
+    final String dup =
+        _sameNameGroups > 0 ? ' · ⚠️ $_sameNameGroups 组同名' : '';
+    final String extra =
+        _filteredOut > 0 ? ' · 已滤掉 $_filteredOut 首铃声/提示音' : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
+      child: Text(
+        '$star$dup$extra',
+        maxLines: 2,
+        style: TextStyle(fontSize: 11, color: pt.textLow, height: 1.4),
+      ),
+    );
   }
 
   Widget _body() {
@@ -926,12 +1177,24 @@ class _LibraryPageState extends State<LibraryPage> {
     if (_stage == 'empty') {
       return _emptyCard();
     }
+    // N10：歌全被隐藏了 —— 列表会是空的，必须说清楚为什么、怎么恢复，
+    //      否则用户看到一片空白只能以为是 App 坏了。
+    if (_songs.isEmpty && _hidden.isNotEmpty) {
+      return _hint('列表里的歌都被隐藏了\n\n点标题栏的「已隐藏 ${_hidden.length}」可以恢复');
+    }
     // N7：搜索无命中 → 明确说「没找到」，绝不给一片空白。
     //（空白会让用户分不清「搜不到」和「App 坏了」）
     if (_searchText.trim().isNotEmpty && _visList().isEmpty) {
       return _hint('没找到「${_searchText.trim()}」\n\n可以搜歌名、歌手或文件名');
     }
-    return _songList();
+    // N10：列表 + 底部诊断串。诊断串原本挂在标题正下方（开发者信息占了门面），
+    //      现在降到列表底部小字 —— 仍然可见，只是不再抢第一眼。
+    return Column(
+      children: <Widget>[
+        Expanded(child: _songList()),
+        _diagnosticsLine(),
+      ],
+    );
   }
 
   /// N7：搜索框。常驻单行 —— 放大镜 + 输入框 + 有输入才出现的 ✕。
@@ -1161,6 +1424,11 @@ class _LibraryPageState extends State<LibraryPage> {
         final _Song m = vis[i];
         final bool playing = _isPlaying(m); // N7：比对象，不比下标
         return InkWell(
+          // N10：长按 = 「不再显示」。
+          // 把「移除」这种不可撤销感的操作放长按，和「短按播放」分开 —— 避免误触。
+          onLongPress: () {
+            _showSongMenu(m);
+          },
           onTap: () {
             // N7：先映射回 _songs 的**真实下标**再播。
             // 🔴 直接 _play(i) 会播「全库第 i 首」＝ 完全不相干的歌（不报错，静默播错）
@@ -1182,25 +1450,15 @@ class _LibraryPageState extends State<LibraryPage> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
-                // N8：序号。展示体数字，编辑感；正在播放的行变橙
-                SizedBox(
-                  width: 28,
-                  child: Text(
-                    '${i + 1}'.padLeft(2, '0'),
-                    style: TextStyle(
-                      fontFamily: kNumFont,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: playing ? pt.accent : pt.textLow,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
+                // N10：封面 48px（圆角 6 = 照片卡片的圆角，不是玩具的圆角）。
+                //     没有内嵌封面的歌走兜底：文件名 hash 出的暖色块 + 首字。
+                _cover(m),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
+                      // 第一行：曲名（左组·这是什么歌） | 时长（右组·它的状态）
                       Row(
                         children: <Widget>[
                           Expanded(
@@ -1209,30 +1467,27 @@ class _LibraryPageState extends State<LibraryPage> {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontSize: 14.5,
+                                fontSize: 15,
                                 color: playing ? pt.accent : pt.text,
-                                fontWeight: playing
-                                    ? FontWeight.w700
-                                    : FontWeight.w500,
+                                fontWeight: FontWeight.w500,
                               ),
                             ),
                           ),
-                          const SizedBox(width: 10),
-                          // N8：时长换展示体数字；颜色压到 pt.textLow ——
-                          // 橙的预算留给「正在发生」，不能花在每行的时长上
+                          const SizedBox(width: 16),
+                          // N10：时长**故意不套**展示体数字 ——
+                          // 那个字体只有 700 粗，会比 500 的中文曲名还重，抢主角的戏。
+                          // 走系统字 12px + 弱化色，安静待在右边。
                           Text(
                             m.dur,
                             style: TextStyle(
-                              fontFamily: kNumFont,
                               fontSize: 12,
-                              fontWeight: FontWeight.w700,
                               color: playing ? pt.accentSoft : pt.textLow,
-                              letterSpacing: 0.2,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 3),
+                      // 第二行：歌手（左组·与曲名强绑定） | 星级（右组·它的状态）
                       Row(
                         children: <Widget>[
                           Expanded(
@@ -1244,7 +1499,7 @@ class _LibraryPageState extends State<LibraryPage> {
                                   TextStyle(fontSize: 12, color: pt.muted),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 16),
                           _starsRow(m), // N6：5 颗可点的星
                         ],
                       ),
@@ -1258,6 +1513,81 @@ class _LibraryPageState extends State<LibraryPage> {
       },
     );
   }
+
+  // ===== N10：列表封面 =====
+
+  /// 有封面用封面，没封面用兜底色块。
+  ///
+  /// `QueryArtworkWidget` 的 `id` 是必填 int（MediaStore 歌曲 id）——
+  /// 这就是 `_Song` 必须有 id 字段的原因：没有它，封面取不出来。
+  ///
+  /// `size: 160` 是**解码尺寸**：列表只显示 48dp，压到 160 省内存也省电
+  /// （战略层：省电优先；48dp 在 3x 屏上也才 144px，160 够用）。
+  Widget _cover(_Song m) {
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: QueryArtworkWidget(
+          id: m.id,
+          type: ArtworkType.AUDIO,
+          artworkWidth: 48,
+          artworkHeight: 48,
+          artworkBorder: BorderRadius.circular(6),
+          artworkFit: BoxFit.cover,
+          artworkQuality: FilterQuality.medium,
+          quality: 70,
+          size: 160,
+          keepOldArtwork: true,
+          nullArtworkWidget: _coverFallback(m),
+        ),
+      ),
+    );
+  }
+
+  /// 没有内嵌封面的歌（flac 很常见）：文件名 hash → 暖色块 + 首字。
+  ///
+  /// 为什么用**固定色板**而不是 hash 算 HSL：hash 出来的颜色不可控，
+  /// 偶尔会撞出难看的色相，直接破坏暖胶调性。这 6 个色是挑过的暖棕 / 苔绿。
+  Widget _coverFallback(_Song m) {
+    final int h = _hash(m.fileName);
+    final Color bg = _kFallbackCovers[h % _kFallbackCovers.length];
+    final String ch = m.title.isEmpty ? '?' : m.title.substring(0, 1);
+    return Container(
+      width: 48,
+      height: 48,
+      color: bg,
+      alignment: Alignment.center,
+      child: Text(
+        ch,
+        style: const TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w500,
+          color: Color(0xFFF2E8D9),
+        ),
+      ),
+    );
+  }
+
+  /// 自己写 hash，不用 `String.hashCode` —— 保证跨版本、跨运行都稳定：
+  /// 同一首歌在任何手机上永远拿到同一个颜色，不会今天棕明天绿。
+  static int _hash(String s) {
+    int h = 0;
+    for (int i = 0; i < s.length; i++) {
+      h = (h * 31 + s.codeUnitAt(i)) & 0x7fffffff;
+    }
+    return h;
+  }
+
+  static const List<Color> _kFallbackCovers = <Color>[
+    Color(0xFF6B4A2F), // 深棕
+    Color(0xFF7A5230), // 琥珀棕
+    Color(0xFF5C4A32), // 灰棕
+    Color(0xFF8A6A3A), // 焦糖
+    Color(0xFF4E5B3C), // 苔绿
+    Color(0xFF6B5A3E), // 暖橄榄
+  ];
 
   /// 底部播放条：曲名 + 歌手 + 进度条 + 时间 + ⏮ ⏯ ⏭
   Widget _playerBar() {
@@ -1284,27 +1614,41 @@ class _LibraryPageState extends State<LibraryPage> {
           Row(
             children: <Widget>[
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      s.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: pt.accent,
+                // N10：点曲名区 → 打开全屏播放页。
+                // 提示箭头用 expand_less（向上），暗示「往上展开成整页」。
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _openNowPlaying,
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              s.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: pt.accent,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              s.artist.isEmpty ? '未知歌手' : s.artist,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 11.5, color: pt.muted),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      s.artist.isEmpty ? '未知歌手' : s.artist,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 11.5, color: pt.muted),
-                    ),
-                  ],
+                      const SizedBox(width: 6),
+                      Icon(Icons.expand_less, size: 20, color: pt.textLow),
+                    ],
+                  ),
                 ),
               ),
               IconButton(
@@ -1466,4 +1810,466 @@ class _LibraryPageState extends State<LibraryPage> {
       },
     );
   }
+
+  /// N10：点曲名区 → 打开全屏「正在播放」页。
+  /// 系统返回（返回键 + 安卓边缘返回手势）由 Navigator 自动接管，不写额外手势 ——
+  /// 下滑返回是 iOS 习惯，且在安卓上会和封面区的滑动误触。
+  void _openNowPlaying() {
+    if (_index < 0 || _index >= _songs.length) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext c) => _NowPlayingPage(
+          player: _player,
+          songs: _songs,
+          stars: _stars,
+          // _rate / _next / _prev / _setSleep 内部各自会 setState，这里不要再包一层
+          // —— 嵌套 setState 虽不崩，但纯属冗余，还容易让人误以为外面这层才是关键。
+          onRate: _rate,
+          onNext: _next,
+          onPrev: _prev,
+          onSleep: _setSleep,
+        ),
+      ),
+    );
+  }
+
+  /// 睡眠定时：到点**直接停**。
+  /// （十一拍板：不做「播完当前曲再停」—— 人睡着了不需要优雅收尾，
+  ///   没睡着会自己再设定时；直接停还更省电。）
+  Timer? _sleepTimer;
+
+  void _setSleep(int minutes) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (minutes <= 0) {
+      _toast('已取消定时');
+      return;
+    }
+    _sleepTimer = Timer(Duration(minutes: minutes), () {
+      _player.stop();
+      if (mounted) {
+        setState(() {
+          _index = -1;
+        });
+      }
+      _toast('定时到了，已停止播放');
+    });
+    _toast('$minutes 分钟后停止播放');
+  }
+}
+
+// ============================================================================
+//  N10：正在播放（全屏页）
+//
+//  构图蓝本 = 十一给的参考图 4：深底 + 方形封面卡 + 唱片右侧半露 + 控件在下。
+//  背景 = 参考图 1 的做法（封面放大模糊 + 暗遮罩）—— **零新依赖**。
+//  不做「取色渐变」：老歌封面取色容易脏，而模糊原封面永远不会脏，它就是封面本身。
+//
+//  🔴 状态一律用 StreamBuilder 读播放器（currentIndex / position / playerState /
+//     shuffleModeEnabled）—— 这样无论切歌来自页面内按钮、后台自动切、还是通知栏，
+//     页面都跟着变，不会出现「显示 A 却在播 B」这种最难查的错位。
+//
+//  🔴 唱片**不转**（十一拍板 1B + 战略层省电）：静态 CustomPaint 画同心圆，
+//     零动画零重绘；要照片级质感才需要换图片，但那会加体积且不能随主题变色。
+// ============================================================================
+class _NowPlayingPage extends StatelessWidget {
+  const _NowPlayingPage({
+    required this.player,
+    required this.songs,
+    required this.stars,
+    required this.onRate,
+    required this.onNext,
+    required this.onPrev,
+    required this.onSleep,
+  });
+
+  final AudioPlayer player;
+  final List<_Song> songs;
+  final Map<String, int> stars;
+  final void Function(_Song, int) onRate;
+  final void Function() onNext;
+  final void Function() onPrev;
+  final void Function(int) onSleep;
+
+  @override
+  Widget build(BuildContext context) {
+    final PopTheme pt = PopThemeScope.of(context);
+    return Scaffold(
+      backgroundColor: pt.ink,
+      body: StreamBuilder<int?>(
+        stream: player.currentIndexStream,
+        builder: (BuildContext c, AsyncSnapshot<int?> snap) {
+          final int i = snap.data ?? player.currentIndex ?? 0;
+          if (songs.isEmpty || i < 0 || i >= songs.length) {
+            return const SizedBox.shrink();
+          }
+          final _Song s = songs[i];
+          return Stack(
+            children: <Widget>[
+              Positioned.fill(child: _backdrop(s, pt)),
+              SafeArea(child: _content(context, s, pt)),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// 模糊氛围背景：封面放大 → 高斯模糊 → 压一层暗色。
+  /// 只在切歌时重算一次（静态），不是每帧 —— 不违背省电目标。
+  Widget _backdrop(_Song s, PopTheme pt) {
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        ImageFiltered(
+          imageFilter: ImageFilter.blur(sigmaX: 26, sigmaY: 26),
+          child: Transform.scale(
+            scale: 1.4,
+            child: QueryArtworkWidget(
+              id: s.id,
+              type: ArtworkType.AUDIO,
+              artworkFit: BoxFit.cover,
+              artworkWidth: 480,
+              artworkHeight: 960,
+              size: 320, // 反正要糊掉，解码尺寸压小 —— 省内存省电
+              quality: 55,
+              keepOldArtwork: true,
+              nullArtworkWidget: Container(color: pt.panel),
+            ),
+          ),
+        ),
+        Container(color: pt.ink.withOpacity(0.76)),
+      ],
+    );
+  }
+
+  Widget _content(BuildContext context, _Song s, PopTheme pt) {
+    return Column(
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 4, 6, 0),
+          child: Row(
+            children: <Widget>[
+              IconButton(
+                icon: Icon(Icons.expand_more, color: pt.text),
+                tooltip: '回到曲库',
+                onPressed: () => Navigator.pop(context),
+              ),
+              Expanded(
+                child: Text(
+                  '正在播放',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 13, color: pt.muted, letterSpacing: 1.5),
+                ),
+              ),
+              IconButton(
+                icon: Icon(Icons.timer_outlined, color: pt.muted),
+                tooltip: '睡眠定时',
+                onPressed: () => _sleepSheet(context, pt),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: Center(child: _coverWithVinyl(context, s, pt)),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                s.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    color: pt.text,
+                    letterSpacing: 0.5),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                s.artist.isEmpty ? '未知歌手' : s.artist,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: pt.muted),
+              ),
+              const SizedBox(height: 6),
+              _starsInline(s, pt),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _progress(s, pt),
+        const SizedBox(height: 2),
+        // 顺序 / 随机 —— 十一拍板：入口跟着播放组件走
+        _modeButton(pt),
+        const SizedBox(height: 4),
+        _controls(pt),
+        const SizedBox(height: 18),
+      ],
+    );
+  }
+
+  /// 方形封面卡 + 右侧半露的黑胶唱片。
+  Widget _coverWithVinyl(BuildContext context, _Song s, PopTheme pt) {
+    final double size = MediaQuery.of(context).size.width - 96;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        children: <Widget>[
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: QueryArtworkWidget(
+                id: s.id,
+                type: ArtworkType.AUDIO,
+                artworkFit: BoxFit.cover,
+                artworkWidth: size,
+                artworkHeight: size,
+                artworkBorder: BorderRadius.circular(6),
+                size: 600,
+                quality: 90,
+                keepOldArtwork: true,
+                nullArtworkWidget: _fallbackBig(s, pt),
+              ),
+            ),
+          ),
+          // 唱片从右侧露出约四成 —— 这是「暖胶复古」的签名元素
+          Positioned(
+            right: -size * 0.30,
+            top: size * 0.19,
+            child: CustomPaint(
+              size: Size(size * 0.62, size * 0.62),
+              painter: _VinylPainter(pt: pt),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _fallbackBig(_Song s, PopTheme pt) {
+    return Container(
+      color: pt.raised,
+      alignment: Alignment.center,
+      child: Text(
+        s.title.isEmpty ? '?' : s.title.substring(0, 1),
+        style: TextStyle(fontSize: 64, color: pt.muted),
+      ),
+    );
+  }
+
+  Widget _starsInline(_Song s, PopTheme pt) {
+    final int cur = stars[s.fileName] ?? 0;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List<Widget>.generate(5, (int k) {
+        return IconButton(
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          iconSize: 24,
+          icon: Icon(
+            k < cur ? Icons.star : Icons.star_border,
+            color: k < cur ? pt.accent : pt.starOff,
+          ),
+          onPressed: () => onRate(s, k + 1),
+        );
+      }),
+    );
+  }
+
+  Widget _progress(_Song s, PopTheme pt) {
+    return StreamBuilder<Duration>(
+      stream: player.positionStream,
+      builder: (BuildContext c, AsyncSnapshot<Duration> snap) {
+        final int cur = (snap.data ?? Duration.zero).inMilliseconds;
+        final int total = s.durMs > 0 ? s.durMs : 1;
+        double v = cur / total;
+        if (v < 0) v = 0;
+        if (v > 1) v = 1;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            children: <Widget>[
+              SliderTheme(
+                data: SliderThemeData(
+                  trackHeight: 4,
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 7),
+                  activeTrackColor: pt.accent,
+                  inactiveTrackColor: pt.line,
+                  thumbColor: pt.accentSoft,
+                ),
+                child: Slider(
+                  value: v,
+                  onChanged: (double x) {
+                    player.seek(Duration(milliseconds: (x * total).round()));
+                  },
+                ),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: <Widget>[
+                  Text(_mmss(cur),
+                      style: TextStyle(fontSize: 12, color: pt.muted)),
+                  Text(_mmss(total),
+                      style: TextStyle(fontSize: 12, color: pt.muted)),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _modeButton(PopTheme pt) {
+    return StreamBuilder<bool>(
+      stream: player.shuffleModeEnabledStream,
+      builder: (BuildContext c, AsyncSnapshot<bool> snap) {
+        final bool on = snap.data ?? false;
+        return TextButton.icon(
+          style: TextButton.styleFrom(
+            minimumSize: const Size(0, 34),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: Icon(
+            on ? Icons.shuffle : Icons.repeat,
+            size: 17,
+            color: on ? pt.accent : pt.muted,
+          ),
+          label: Text(
+            on ? '随机播放' : '顺序播放',
+            style:
+                TextStyle(fontSize: 12.5, color: on ? pt.accent : pt.muted),
+          ),
+          onPressed: () async {
+            try {
+              await player.setShuffleModeEnabled(!on);
+            } catch (e) {
+              // 切换失败不致命
+            }
+          },
+        );
+      },
+    );
+  }
+
+  /// 控件区：⏮ / 大播放键 72px / ⏭ —— 位于屏幕下半部（拇指区）。
+  Widget _controls(PopTheme pt) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: <Widget>[
+        IconButton(
+          iconSize: 34,
+          icon: Icon(Icons.skip_previous, color: pt.text),
+          tooltip: '上一首',
+          onPressed: onPrev,
+        ),
+        const SizedBox(width: 24),
+        StreamBuilder<PlayerState>(
+          stream: player.playerStateStream,
+          builder: (BuildContext c, AsyncSnapshot<PlayerState> snap) {
+            final bool playing = snap.data?.playing ?? false;
+            return GestureDetector(
+              onTap: () {
+                if (playing) {
+                  player.pause();
+                } else {
+                  player.play();
+                }
+              },
+              child: Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: pt.accent,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: pt.strokeStrong, width: 2),
+                  boxShadow: <BoxShadow>[
+                    BoxShadow(
+                        color: pt.shadow, offset: Offset(0, 3), blurRadius: 0),
+                  ],
+                ),
+                child: Icon(
+                  playing ? Icons.pause : Icons.play_arrow,
+                  size: 38,
+                  color: pt.ink,
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(width: 24),
+        IconButton(
+          iconSize: 34,
+          icon: Icon(Icons.skip_next, color: pt.text),
+          tooltip: '下一首',
+          onPressed: onNext,
+        ),
+      ],
+    );
+  }
+
+  void _sleepSheet(BuildContext context, PopTheme pt) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: pt.panel,
+      builder: (BuildContext c) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                child: Text('多久以后停止播放',
+                    style: TextStyle(fontSize: 13, color: pt.muted)),
+              ),
+              for (final int m in const <int>[15, 30, 60])
+                ListTile(
+                  title: Text('$m 分钟后',
+                      style: TextStyle(fontSize: 15, color: pt.text)),
+                  onTap: () {
+                    Navigator.pop(c);
+                    onSleep(m);
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 静态黑胶唱片（同心圆沟槽 + 琥珀标签 + 中心孔）。
+/// **不转** —— 零动画零重绘，符合战略层「省电」。
+class _VinylPainter extends CustomPainter {
+  const _VinylPainter({required this.pt});
+
+  final PopTheme pt;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double r = size.width / 2;
+    final Offset c = Offset(r, r);
+
+    canvas.drawCircle(c, r, Paint()..color = const Color(0xFF1A1512));
+    final Paint groove = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = pt.line.withOpacity(0.55);
+    for (double rr = r * 0.40; rr < r * 0.95; rr += 4) {
+      canvas.drawCircle(c, rr, groove);
+    }
+    canvas.drawCircle(c, r * 0.34, Paint()..color = pt.accent);
+    canvas.drawCircle(c, r * 0.05, Paint()..color = pt.ink);
+  }
+
+  @override
+  bool shouldRepaint(covariant _VinylPainter old) => old.pt != pt;
 }
