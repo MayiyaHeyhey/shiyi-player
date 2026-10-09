@@ -64,7 +64,7 @@ import 'package:on_audio_query/on_audio_query.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // 版本号（和 pubspec 的 version 保持一致，方便截图验收时确认装的是哪一版）
-String kBuild = 'v0.10.0 · N10';
+String kBuild = 'v0.10.1 · N10.1';
 
 // ===== 主题系统（N9 双主题：十一拍板「两个都要，分两期」）=====
 // 两套皮肤共用同一个形状骨架，差异集中在「潮玩浓度」这一个旋钮上：
@@ -136,8 +136,14 @@ class PopThemeScope extends InheritedWidget {
 
   final PopTheme theme;
 
-  static PopTheme of(BuildContext c) =>
-      c.dependOnInheritedWidgetOfExactType<PopThemeScope>()!.theme;
+  // ⚠️ 绝不用 `!` 断言：一旦某处路由/弹层不在作用域内，断言会抛异常，
+  //    build 失败 ⇒ release 包里错误页不绘制 ⇒ 露出安卓白底 = 用户看到的「白画面」。
+  //   取不到就退回默认皮肤，最坏只是配色不对，绝不再白屏。
+  static PopTheme of(BuildContext c) {
+    final PopThemeScope? scope =
+        c.dependOnInheritedWidgetOfExactType<PopThemeScope>();
+    return scope?.theme ?? PopTheme.pop70;
+  }
 
   @override
   bool updateShouldNotify(PopThemeScope oldWidget) =>
@@ -266,15 +272,21 @@ class _ShiyiPlayerAppState extends State<ShiyiPlayerApp> {
   @override
   Widget build(BuildContext context) {
     final PopTheme pt = _themeId == 'pop30' ? PopTheme.pop30 : PopTheme.pop70;
-    return MaterialApp(
-      title: '接着奏乐',
-      debugShowCheckedModeBanner: false,
-      // 两套皮肤都是深色 —— 显式锁死 theme 通道，防止系统深浅色模式抢权
-      themeMode: ThemeMode.light,
-      theme: buildAppTheme(pt),
-      home: PopThemeScope(
-        theme: pt,
-        child: LibraryPage(
+    // 🔴 PopThemeScope **必须罩在 MaterialApp 外面**，不能塞进 home:。
+    //    home 只是根路由；Navigator 推出来的二级页（播放页）和
+    //    showModalBottomSheet 的弹层都活在 MaterialApp 的 Overlay 里 ——
+    //    它们在 MaterialApp **之下**、却不在 home 之下。
+    //    放在 home 里 ⇒ 二级页取不到皮肤 ⇒ 曾经的「播放页白画面」事故。
+    return PopThemeScope(
+      theme: pt,
+      child: MaterialApp(
+        title: '接着奏乐',
+        debugShowCheckedModeBanner: false,
+        // 两套皮肤都是深色 —— 显式锁死 theme 通道，防止系统深浅色模式抢权
+        themeMode: ThemeMode.light,
+        theme: buildAppTheme(pt),
+        // ThemeData 已带 scaffoldBackgroundColor，二级页的 Scaffold 一样是深色底
+        home: LibraryPage(
           onToggleTheme: _toggleTheme,
           themeName: pt.label,
         ),
